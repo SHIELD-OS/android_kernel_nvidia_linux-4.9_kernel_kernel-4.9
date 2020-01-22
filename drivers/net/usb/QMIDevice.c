@@ -1,4 +1,3 @@
-
 /*===========================================================================
 FILE:
    QMIDevice.c
@@ -176,17 +175,6 @@ enum {
 #define gobi_setup_timer(timer, fn, data) timer_setup(timer, fn, 0) 
 #endif
 
-#define RETURN_WHEN_DEVICE_ERR(x) \
-if(isModuleUnload(x))\
-{\
-   return -EFAULT;\
-}\
-else if(IsDeviceDisconnect(x))\
-{\
-  DBG( "Device Disconnected!\n" );\
-  return -ENXIO;\
-}\
-
 /* initially all zero */
 int qcqmi_table[MAX_QCQMI];
 int qmux_table[MAX_QCQMI];
@@ -213,25 +201,9 @@ int SetPrivateWorkQueuesWQByTableIndex(int i,int j,struct workqueue_struct *wq,i
 struct workqueue_struct *GetPrivateWorkQueuesWQByTableIndex(int i,int j,int type);
 int ClearPrivateWorkQueuesProcessByTableIndex(int i,int j);
 void GobiCancelReadCallBackWorkQueue(sGobiUSBNet *pGobiDev);
-void GobiCancelProbeWorkQueue(sGobiUSBNet *pGobiDev);
-#ifdef CONFIG_ANDROID
-void GobiCancelLockSystemSleepWorkQueue(sGobiUSBNet *pGobiDev);
-void GobiCancelUnLockSystemSleepWorkQueue(sGobiUSBNet *pGobiDev);
-#endif
-
 bool TransceiveReleaseClientID(
    sGobiUSBNet *    pDev,
    u16                clientID);
-void GobiCancelDelayWorkWorkQueue(
-   sGobiUSBNet *pGobiDev,
-   struct workqueue_struct *wq, 
-   struct delayed_work *dw);
-#ifdef CONFIG_ANDROID
-void GobiCancelDelayWorkWorkQueueWithoutUSBLockDevice(
-   sGobiUSBNet *pGobiDev,
-   struct workqueue_struct *wq, 
-   struct delayed_work *dw);
-#endif
 
 #define CLIENT_READMEM_SNAPSHOT(clientID, pdev)\
    if( (debug & DEBUG_QMI) && clientmemdebug )\
@@ -262,13 +234,6 @@ int GobiNetSuspend(
 int wakeup_inode_process(struct file *pFilp,struct task_struct * pTask);
 void gobi_try_wake_up_process(struct task_struct * pTask);
 int gobi_work_busy(struct delayed_work *dw);
-extern int GobiUSBLockReset( struct usb_interface *pIntf );
-extern int iIsRemoteWakeupSupport(struct usbnet *pDev);
-extern bool iIsSpinIsLockedSupported;
-bool isFilpSignalPending(sQMIFilpStorage *pFilpData);
-void ReleaseFilpClientID(sQMIFilpStorage *pFilpData);
-void assign_filp_pointer_to_null(struct file *filp);
-bool bIsQMIInterrupt(struct urb *pIntURB);
 
 // IOCTL to generate a client ID for this service type
 #define IOCTL_QMI_GET_SERVICE_FILE 0x8BE0 + 1
@@ -336,13 +301,6 @@ const int i = 1;
                            : CDC_CONNSPD_MASK_LE; \
 }
 
-#define gobi_usb_unlink_urb(urb)({\
-   if (!(urb && urb->dev && urb->ep))\
-      return;\
-   atomic_inc(&urb->reject);\
-   usb_unlink_urb(urb);\
-})
-
 #define SPIN_LOCK_DEBUG 0
 
 /*=========================================================================*/
@@ -367,12 +325,6 @@ const int i = 1;
 #define in_serving_softirq()	(softirq_count() & SOFTIRQ_OFFSET)
 #endif
 
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION( 5,0,0 ))
-   #define gobi_dev_change_flags(dev,flags) dev_change_flags(dev, flags, NULL)
-#else
-   #define gobi_dev_change_flags(dev,flags) dev_change_flags(dev, flags)
-#endif
-
 static int gobi_qmimux_open(struct net_device *dev)
 {
    struct gobi_qmimux_priv *priv = netdev_priv(dev);
@@ -382,9 +334,8 @@ static int gobi_qmimux_open(struct net_device *dev)
    if (!(priv->real_dev->flags & (IFF_UP|IFF_RUNNING)))
    {
       printk("Adaptor Not Up\n");
-      oflags = dev->flags;      
-      if (gobi_dev_change_flags(real_dev, oflags | IFF_UP | IFF_RUNNING) < 0)
-      {
+      oflags = dev->flags;
+      if (dev_change_flags(real_dev, oflags | IFF_UP | IFF_RUNNING) < 0) {
           printk("IP-Config: Failed to open %s\n",
           dev->name);
       }
@@ -482,45 +433,6 @@ static const struct net_device_ops gobi_qmimux_netdev_ops = {
 };
 
 /*=========================================================================*/
-#ifdef CONFIG_ANDROID
-#define GOBI_MIN_AUTO_SUSPEND_DELAY 1000
-#define GOBI_MAX_AUTO_SUSPEND_DELAY 10000
-void BackupAutoSuspend_Delay(sGobiUSBNet *pDev)
-{
-    struct device *dev = &pDev->mpNetDev->udev->dev;
-    if(pDev->autosuspend_overrided == false)
-    {
-        if(dev->power.runtime_auto == true)
-        {
-            //backup delay set by kernel (default is 2 seconds)
-            pDev->autosuspend_delay = dev->power.autosuspend_delay;
-            DBG("autosuspend = %zu \n", pDev->autosuspend_delay);
-            //allow more auto suspend delay for QMI msg req/resp
-            pm_runtime_set_autosuspend_delay(dev,GOBI_MAX_AUTO_SUSPEND_DELAY);    
-            pDev->autosuspend_overrided = true;
-        }
-    }
-}
-void RestoreAutoSuspend_Delay(sGobiUSBNet *pDev)
-{
-    struct device *dev = &pDev->mpNetDev->udev->dev;
-    if(pDev->autosuspend_overrided == true)
-    {    
-        if(dev->power.runtime_auto == true)
-        {
-            DBG("autosuspend delay restore from %d to %zu \n",dev->power.autosuspend_delay, pDev->autosuspend_delay);
-            //small delay may cause issue
-            if(pDev->autosuspend_delay<GOBI_MIN_AUTO_SUSPEND_DELAY) pDev->autosuspend_delay=GOBI_MIN_AUTO_SUSPEND_DELAY;
-            //restore delay set by kernel
-            pm_runtime_set_autosuspend_delay(dev,pDev->autosuspend_delay);
-            pDev->autosuspend_overrided = false;
-        }
-    }
-}
-#define SET_CONTROL_LINE_STATE_REQUEST             0x22
-#define CONTROL_DTR                     0x01
-#define CONTROL_RTS                     0x02
-#endif
 
 
 /*=========================================================================*/
@@ -644,14 +556,7 @@ static struct usb_endpoint_descriptor *GetEndpoint(
 #if (LINUX_VERSION_CODE < KERNEL_VERSION( 3,9,0 ))
 static inline struct inode *file_inode(const struct file *f)
 {
-   if(f)
-   {
-      if(f->f_path.dentry)
-      {
-         return f->f_path.dentry->d_inode;
-      }
-   }
-   return NULL;
+   return f->f_path.dentry->d_inode;
 }
 #endif
 
@@ -675,7 +580,6 @@ int gobi_filp_close(struct file *filp, fl_owner_t id)
    if (filp->f_op->flush)
       retval = filp->f_op->flush(filp, id);
    fput(filp);
-   assign_filp_pointer_to_null(filp);
    return retval;
 }
 
@@ -733,15 +637,11 @@ int ForceFilpClose(struct file *pFilp)
 
 static inline int LocalClientMemLockSpinIsLock( sGobiUSBNet * pDev)
 {
-   if(pDev!=NULL)
-   {
-      if(iIsSpinIsLockedSupported==false)
-      {
-         return atomic_read(&pDev->aClientMemIsLock);
-      }
-      return spin_is_locked(&pDev->mQMIDev.mClientMemLock);
-   }
-   return 0;
+    if(pDev!=NULL)
+    {
+        return spin_is_locked(&pDev->mQMIDev.mClientMemLock);
+    }
+    return 0;
 }
 
 static inline unsigned long LocalClientMemLockSpinLockIRQSave( sGobiUSBNet * pDev, int line)
@@ -759,15 +659,6 @@ static inline unsigned long LocalClientMemLockSpinLockIRQSave( sGobiUSBNet * pDe
       printk("(%d)%s :%d Locked\n",task_pid_nr(current),__FUNCTION__,line);
       #endif
       pDev->mQMIDev.pTask = current;
-      if(LocalClientMemLockSpinIsLock(pDev) == 0)
-      {
-         iIsSpinIsLockedSupported = false;
-         DBG("spin_is_locked is not supported\n");
-      }
-      if(iIsSpinIsLockedSupported==false)
-      {
-         atomic_set(&pDev->aClientMemIsLock,CLIENT_MEMORY_LOCK);
-      }
       return 0;
    }
    mb();
@@ -791,10 +682,6 @@ static inline int LocalClientMemUnLockSpinLockIRQRestore( sGobiUSBNet * pDev, un
       printk("(%d)%s %d :%d\n",task_pid_nr(current),__FUNCTION__,__LINE__,line);
       #endif
       pDev->mQMIDev.pTask = NULL;
-      if(iIsSpinIsLockedSupported==false)
-      {
-         atomic_set(&pDev->aClientMemIsLock,CLIENT_MEMORY_UNLOCK);
-      }
       spin_unlock_irq( &pDev->mQMIDev.mClientMemLock);
    }
    else
@@ -923,18 +810,7 @@ void GobiSetDownReason(
    {
       pDev->iNetLinkStatus = eNetDeviceLink_Disconnected;
    }
-   #ifdef CONFIG_ANDROID
-   if (DRIVER_SUSPENDED != reason)
-   {
-      //Android 6.0 dhcpcd detect device down/up during host suspend/resume
-      //causes dhcpcd delete/add route after resume, but it's not working and cause issue ANDROIDRIL-310
-      //workaround : do not make device off during suspend
-      //usbnet.c->usbnet_bh() also need to modify to incorporate this change 
-      netif_carrier_off( pDev->mpNetDev->net );
-   }
-   #else
    netif_carrier_off( pDev->mpNetDev->net );
-   #endif
 }
 
 /*===========================================================================
@@ -964,12 +840,6 @@ void GobiClearDownReason(
     netif_carrier_on( pDev->mpNetDev->net );
 #else
    if (pDev->mDownReason == 0)
-   {
-      netif_carrier_on( pDev->mpNetDev->net );
-   }
-   else if ( netif_running(pDev->mpNetDev->net) && 
-             (reason==NO_NDIS_CONNECTION) &&
-             !test_bit(DRIVER_SUSPENDED, &pDev->mDownReason) )
    {
       netif_carrier_on( pDev->mpNetDev->net );
    }
@@ -1159,7 +1029,7 @@ void ReadCallback( struct urb * pReadURB )
    DBG( "Read %d bytes\n", pReadURB->actual_length );
 
    pData = pReadURB->transfer_buffer;
-   if((int)(pReadURB->actual_length)>=0)
+   if(pReadURB->actual_length>=0)
    {
       dataSize = pReadURB->actual_length;
    }
@@ -1180,36 +1050,6 @@ void ReadCallback( struct urb * pReadURB )
    result = ParseQMUX( &clientID,
                        pData,
                        dataSize );
-   if( (clientID==QMICTL) &&
-       (result > 0) )
-   {
-      u8 u8Type = 0;
-      u16 u16MsgID = 0;
-      u8Type = *(u8*)(pData + result);
-      transactionID = *(u8*)(pData + result + 1);
-      u16MsgID = le16_to_cpu( get_unaligned((u16*)(pData + result + 2)) );
-      if(u8Type==QMI_CTL_IND)
-      {
-         DBG("u8Type:0x%02x, TID:0x%02x ,MSGID:0x%02x\n",
-         u8Type, transactionID,u16MsgID);
-         if(u16MsgID==QMI_CTL_SYNC_IND)
-         {
-            if(pDev)
-            {
-               if(pDev->dev!=NULL)
-               {
-                  printk(KERN_INFO "RESET DEVICE IND\n");
-                  GobiUSBLockReset(pDev->mpIntf);
-                  return;
-               }
-               else
-               {
-                  DBG("IGNORE REGISTER\n");
-               }
-            }
-         }
-      }
-   }
    if (result < 0)
    {
       DBG( "Read error parsing QMUX %d\n", result );
@@ -1521,8 +1361,8 @@ void IntCallback( struct urb * pIntURB )
       #endif
       //AR7554RD returned interrupt buffer not matching expected mask
       //thus, length check only
-      if ((pIntURB->actual_length == 8) ||
-          bIsQMIInterrupt(pIntURB))
+      if (pIntURB->actual_length == 8)
+
       {
          // Time to read
          usb_fill_control_urb( pDev->mQMIDev.mpReadURB,
@@ -1747,15 +1587,6 @@ int StartRead( sGobiUSBNet * pDev )
       return -ENXIO;
    }
    mb();
-   usb_reset_endpoint(pDev->mpNetDev->udev,0);
-   usb_reset_endpoint(pDev->mpNetDev->udev,
-      pendp->bEndpointAddress);
-
-   usb_clear_halt(pDev->mpNetDev->udev,
-      usb_rcvctrlpipe( pDev->mpNetDev->udev, 0 ));
-   usb_clear_halt(pDev->mpNetDev->udev,
-      usb_rcvintpipe( pDev->mpNetDev->udev,
-         pendp->bEndpointAddress));
    return usb_submit_urb( pDev->mQMIDev.mpIntURB, GOBI_GFP_ATOMIC );
 }
 
@@ -1780,22 +1611,8 @@ void KillRead( sGobiUSBNet * pDev )
       DBG( "pDev NULL\n" );
       return ;
    }
-   #ifndef CONFIG_ANDROID
    mb();
-   #endif
    local_irq_disable();
-   if (pDev->mQMIDev.mpReadURB != NULL)
-   {
-      DBG( "unlink read URB\n" );
-      gobi_usb_unlink_urb( pDev->mQMIDev.mpReadURB );
-   }
-
-   if (pDev->mQMIDev.mpIntURB != NULL)
-   {
-      DBG( "unlink int URB\n" );
-      gobi_usb_unlink_urb( pDev->mQMIDev.mpIntURB );
-   }
-   local_irq_enable();
    GobiCancelReadCallBackWorkQueue(pDev);
    // Stop reading
    if (pDev->mQMIDev.mpReadURB != NULL)
@@ -1809,6 +1626,8 @@ void KillRead( sGobiUSBNet * pDev )
       DBG( "Killng int URB\n" );
       usb_kill_urb( pDev->mQMIDev.mpIntURB );
    }
+
+   local_irq_enable();
 
    // Release buffers
    kfree( pDev->mQMIDev.mpReadSetupPacket );
@@ -2170,7 +1989,6 @@ int ReadSync(
             else
             *iID = -__LINE__;
          }
-         //userspace neglect -EINTR  
          if(result!=-EINTR)
          {
              flags = LocalClientMemLockSpinLockIRQSave( pDev , __LINE__);
@@ -2515,11 +2333,7 @@ int WriteSync(
        else if(result < 0 )
        {
           DBG( "%s no device!\n" ,__FUNCTION__);
-          if(!signal_pending(current))
-          {
-            pDev->iUSBState = USB_STATE_NOTATTACHED;
-          }
-          return result;
+           return result;
        }
        else
        {
@@ -2678,21 +2492,13 @@ int GetClientID(
                                         serviceType );
          if (result < 0)
          {
-            if(pWriteBuffer)
-            {
-               kfree( pWriteBuffer );
-               pWriteBuffer = NULL;
-            }
+            kfree( pWriteBuffer );
             return result;
          }
       }
       else
       {
-         if(pWriteBuffer)
-         {
-            kfree( pWriteBuffer );
-            pWriteBuffer = NULL;
-         }
+         kfree( pWriteBuffer );
          DBG( "Invalid transaction ID!\n" );
          return -EINVAL;
       }
@@ -2701,22 +2507,13 @@ int GetClientID(
       if (result < 0)
       {
          DBG( "ReadAsync Error!\n" );
-         if(pWriteBuffer)
-         {
-            kfree( pWriteBuffer );
-            pWriteBuffer = NULL;
-         }
          return result;
       }
       result = WriteSync( pDev,
                           pWriteBuffer,
                           writeBufferSize,
                           QMICTL );
-      if(pWriteBuffer)
-      {
-         kfree( pWriteBuffer );
-         pWriteBuffer = NULL;
-      }
+      kfree( pWriteBuffer );
       if (result < 0)
       {
          // Timeout, remove the async read
@@ -2763,7 +2560,7 @@ int GetClientID(
             DBG( "Read mismatch/failure, unlock and continue!\n" );
             spin_unlock_irq(&(pDev->notif_lock));
             LocalClientMemUnLockSpinLockIRQRestore ( pDev ,flags,__LINE__);
-            result = -ETIMEDOUT;
+            result = -1;
          }
       }
       else
@@ -2776,7 +2573,7 @@ int GetClientID(
              // End critical section
              spin_unlock_irq(&(pDev->notif_lock));
              LocalClientMemUnLockSpinLockIRQRestore ( pDev ,flags,__LINE__);
-             result = -ETIMEDOUT;
+             result = -1;
       }
      /* Upon return from QMICTLGetClientIDResp, clientID
       * low address contains the Service Number (SN), and
@@ -2788,14 +2585,7 @@ int GetClientID(
 
       if (result < 0)
       {
-         DBG( "OVERWRITE result:%d!\n",result );
-         result = -ETIMEDOUT;
          return result;
-      }
-      if ((IsDeviceDisconnect(pDev)==false) &&
-            IsDeviceValid( pDev ))
-      {
-         pDev->mReleaseClientIDFail = 0;
       }
    }
    else
@@ -3531,7 +3321,7 @@ long UserspaceunlockedIOCTL(
    }
    if(IsDeviceDisconnect(pFilpData->mpDev))
    {
-      DBG( "Device Disconnected CID:0x%04x!\n", pFilpData->mClientID);
+      DBG( "Device Disconnected!\n" );
       return -ENXIO;
    }
    if(pFilpData->mpDev->mbUnload)
@@ -3542,7 +3332,8 @@ long UserspaceunlockedIOCTL(
 
    if(pFilpData->mDeviceInvalid==1)
    {
-      DBG( "Closing.." );
+      DBG( "Clsoing.." );
+      gobi_filp_close(pFilp,NULL);
       return -ENXIO;
    }
    if(pFilpData->iIsClosing==1)
@@ -3556,15 +3347,6 @@ long UserspaceunlockedIOCTL(
       DBG( "Device Clsoing.." );
       return -ENXIO;
    }
-   #ifdef CONFIG_PM
-   if(bIsSuspend(pFilpData->mpDev))
-   {
-      DBG("RESUME FROM SUSPEND\n");
-      gobi_usb_autopm_get_interface_async( pFilpData->mpDev->mpIntf );
-      gobi_usb_autopm_put_interface_async( pFilpData->mpDev->mpIntf );
-      return -EINTR;
-   }
-   #endif
    pFilpData->pIOCTLTask = current;
    switch (cmd)
    {
@@ -3934,15 +3716,8 @@ long UserspaceunlockedIOCTL(
       case IOCTL_QMI_GET_USBNET_STATS:
          {
              sGobiUSBNet * pDev = pFilpData->mpDev;
-             sNetStats netStats;
-             #if (LINUX_VERSION_CODE >= KERNEL_VERSION( 4,12,0 ))
-             struct rtnl_link_stats64 Stats64;
-             struct rtnl_link_stats64 *pStats = &Stats64;
-             memset(&Stats64,0,sizeof(Stats64));
-             usbnet_get_stats64(pDev->mpNetDev->net,pStats); 
-             #else
              struct net_device_stats * pStats = &(pDev->mpNetDev->net->stats);
-             #endif
+             sNetStats netStats;
 
              if (arg == 0)
              {
@@ -3957,7 +3732,6 @@ long UserspaceunlockedIOCTL(
                  return -ENOMEM;
              }
 
-             memset(&netStats,0,sizeof(netStats));
              /* copy the value from struct net_device_stats to struct sNetStats */
              netStats.rx_packets = pStats->rx_packets;
              netStats.tx_packets = pStats->tx_packets;
@@ -4220,45 +3994,17 @@ int UserspaceClose(
    refcnt = atomic_long_read(&pFilp->f_count);
    if (refcnt > 1)
    {
-      pFilpData = (sQMIFilpStorage *)pFilp->private_data;
-      if(!IsDeviceDisconnect(pFilpData->mpDev) &&
-         (current->exit_signal>0))
+      if(current->exit_signal!=SIGCHLD)
       {
-         if(current->exit_signal!=SIGCHLD)
-         {
-             DBG( "!SIGCHLD %ld CID:%04X exit_signal:%d\n", refcnt,pFilpData->mClientID,current->exit_signal);
-             if((IsOtherTaskUsingFilp(pFilp) ==1)&&
-                   (IsOpenTaskIsCurrent(pFilp)||
-                    IsCurrentTaskExit()))
-             {
-                DBG( "f_count %ld - ignoring close\n", refcnt);
-                return -EBUSY;
-             }
-         }
-         else
-         {
-            DBG( "SIGCHLD %ld \n", refcnt);
-            if(!IsOpenTaskIsCurrent(pFilp))
-            {
-               DBG( "f_count %ld - ignoring close\n", refcnt);
-               if(signal_group_exit(current->signal))
-               {
-                  ReleaseFilpClientID(pFilpData);
-               }
-               return -EBUSY;
-            }
-         }
-         DBG("f_count %ld - close %d %d\n", refcnt,IsOtherTaskUsingFilp(pFilp),IsOpenTaskIsCurrent(pFilp));
-         if (isFilpSignalPending(pFilpData)==false)
-         {
-            DBG( "!SignalPending - ignoring close\n");
-            if(IsOpenTaskIsCurrent(pFilp))
-            {
-               ReleaseFilpClientID(pFilpData);
-            }
-            return -EBUSY;
-         }
+          if((IsOtherTaskUsingFilp(pFilp) ==1)&&
+                (IsOpenTaskIsCurrent(pFilp)||
+                 IsCurrentTaskExit()))
+          {
+             DBG( "f_count %ld - ignoring close\n", refcnt);
+             return -EBUSY;
+          }
       }
+      DBG("f_count %ld - close %d %d\n", refcnt,IsOtherTaskUsingFilp(pFilp),IsOpenTaskIsCurrent(pFilp));
    }
    pFilpData = (sQMIFilpStorage *)pFilp->private_data;
    if (pFilpData == NULL)
@@ -4384,10 +4130,6 @@ int UserspaceClose(
       while(pFilpData->iSemID > 0)
       {
           GobiSyncRcu();
-          if(!pOpenTask)
-          {
-             break;
-          }
           if((signal_pending(current))||(signal_pending(pOpenTask)))
           {
             DBG( "%d wait next\n",__LINE__ );
@@ -4515,8 +4257,7 @@ int UserspaceClose(
      pFilpData->mClientID =  0xffff;
    }
    wait_interrupt();
-   if(pFilp->private_data)
-      kfree( pFilp->private_data );
+   kfree( pFilp->private_data );
 
    // Disable pFilpData so they can't keep sending read or write
    //    should this function hang
@@ -4579,7 +4320,7 @@ ssize_t UserspaceRead(
    }
    if(IsDeviceDisconnect(pFilpData->mpDev))
    {
-      DBG( "Device Disconnected CID:0x%04x!\n", pFilpData->mClientID);
+      DBG( "Device Disconnected!\n" );
       return -ENXIO;
    }
    if(pFilpData->mpDev->mbUnload)
@@ -4611,15 +4352,6 @@ ssize_t UserspaceRead(
       DBG( "Device Clsoing.." );
       return -ENXIO;
    }
-   #ifdef CONFIG_PM
-   if(bIsSuspend(pFilpData->mpDev))
-   {
-      DBG("RESUME FROM SUSPEND\n");
-      gobi_usb_autopm_get_interface_async( pFilpData->mpDev->mpIntf );
-      gobi_usb_autopm_put_interface_async( pFilpData->mpDev->mpIntf );
-      return -EINTR;
-   }
-   #endif
    iCount = pFilpData->iCount;
    pFilpData->pReadTask = current;
 
@@ -4671,7 +4403,7 @@ ssize_t UserspaceRead(
    }
    if(IsDeviceDisconnect(pFilpData->mpDev))
    {
-      DBG( "Device Disconnected CID:0x%04x!\n", pFilpData->mClientID);
+      DBG( "Device Disconnected!\n" );
       return -ENXIO;
    }
    if((pFilpData->mpDev->mbUnload)||(pFilpData->iIsClosing))
@@ -4765,7 +4497,7 @@ ssize_t UserspaceWrite(
    }
    if(IsDeviceDisconnect(pFilpData->mpDev))
    {
-      DBG( "Device Disconnected CID:0x%04x!\n", pFilpData->mClientID);
+      DBG( "Device Disconnected!\n" );
       return -ENXIO;
    }
    if(pFilpData->mpDev->mbUnload)
@@ -4777,6 +4509,7 @@ ssize_t UserspaceWrite(
    if(pFilpData->mDeviceInvalid)
    {
       DBG( "mDeviceInvalid\n");
+      gobi_filp_close(pFilp,NULL);
       return -ENXIO;
    }
 
@@ -4796,15 +4529,7 @@ ssize_t UserspaceWrite(
       DBG( "Device Clsoing.." );
       return -ENXIO;
    }
-   #ifdef CONFIG_PM
-   if(bIsSuspend(pFilpData->mpDev))
-   {
-      DBG("RESUME FROM SUSPEND\n");
-      gobi_usb_autopm_get_interface_async( pFilpData->mpDev->mpIntf );
-      gobi_usb_autopm_put_interface_async( pFilpData->mpDev->mpIntf );
-      return -EINTR;
-   }
-   #endif
+
    // Copy data from user to kernel space
    pWriteBuffer = kmalloc( size + QMUXHeaderSize(), GOBI_GFP_KERNEL );
    if (pWriteBuffer == NULL)
@@ -4828,7 +4553,7 @@ ssize_t UserspaceWrite(
    if(pFilpData!=NULL)
    if(IsDeviceDisconnect(pFilpData->mpDev))
    {
-      DBG( "Device Disconnected CID:0x%04x!\n", pFilpData->mClientID);
+      DBG( "Device Disconnected!\n" );
       return -ENXIO;
    }
    // On success, return requested size, not full QMI reqest size
@@ -4897,15 +4622,6 @@ unsigned int UserspacePoll(
       DBG( "Device Disconnected!\n" );
       return -ENXIO;
    }
-   #ifdef CONFIG_PM
-   if(bIsSuspend(pFilpData->mpDev))
-   {
-      DBG("RESUME FROM SUSPEND\n");
-      gobi_usb_autopm_get_interface_async( pFilpData->mpDev->mpIntf );
-      gobi_usb_autopm_put_interface_async( pFilpData->mpDev->mpIntf );
-      return -EINTR;
-   }
-   #endif
    // Critical section
    flags = LocalClientMemLockSpinLockIRQSave( pFilpData->mpDev , __LINE__);
 
@@ -4939,9 +4655,6 @@ unsigned int UserspacePoll(
        DBG("SKIP AddToNotifyList\n");
    }
 
-   // End critical section
-   LocalClientMemUnLockSpinLockIRQRestore ( pFilpData->mpDev ,flags,__LINE__);
-
    poll_wait( pFilp, &pClientMem->mWaitQueue, pPollTable );
 
    if (pClientMem->mpList != NULL)
@@ -4949,16 +4662,9 @@ unsigned int UserspacePoll(
       status |= POLLIN | POLLRDNORM;
    }
 
-   if (IsDeviceValid( pFilpData->mpDev ) == false)
-   {
-      DBG( "Invalid device! Updating f_ops\n" );
-      return POLLERR;
-   }
-   if(IsDeviceDisconnect(pFilpData->mpDev))
-   {
-      DBG( "Device Disconnected!\n" );
-      return -ENXIO;
-   }
+   // End critical section
+   LocalClientMemUnLockSpinLockIRQRestore ( pFilpData->mpDev ,flags,__LINE__);
+
    // Always ready to write 
    return (status | POLLOUT | POLLWRNORM);
 }
@@ -5014,11 +4720,6 @@ int wakeup_inode_process(struct file *pFilp,struct task_struct * pTask)
       return 0;
    }
    DBG( "%d i_ino:%lu\n",__LINE__ ,i_no);
-   if(!pTask)
-   {
-      DBG( "pTask NULL\n");
-      return 0;
-   }
    if(signal_pending(pTask))
    {
       DBG("signal_pending %d\n",__LINE__);
@@ -5248,8 +4949,11 @@ int QMICTLSyncProc(sGobiUSBNet *pDev)
    unsigned long flags;
    u16 readBufferSize;
 
-   RETURN_WHEN_DEVICE_ERR(pDev);
-
+   if (IsDeviceValid( pDev ) == false)
+   {
+      DBG( "Invalid device\n" );
+      return -EFAULT;
+   }
    sema_init( &readSem, SEMI_INIT_DEFAULT_VALUE );
    mb();
    writeBufferSize= QMICTLSyncReqSize();
@@ -5267,11 +4971,7 @@ int QMICTLSyncProc(sGobiUSBNet *pDev)
                            transactionID );
    if (result < 0)
    {
-      if(pWriteBuffer)
-      {
-         kfree( pWriteBuffer );
-         pWriteBuffer = NULL;
-      }
+      kfree( pWriteBuffer );
       return result;
    }
 
@@ -5282,15 +4982,7 @@ int QMICTLSyncProc(sGobiUSBNet *pDev)
                     pWriteBuffer,
                     writeBufferSize,
                     QMICTL );
-   }
-   if(pWriteBuffer)
-   {
       kfree( pWriteBuffer );
-      pWriteBuffer = NULL;
-   }
-   if(result<0)
-   {
-      return result;
    }
    wait_control_msg_semaphore_timeout(&readSem,QMI_CONTROL_MAX_MSG_DELAY_MS);
    mb();
@@ -5425,7 +5117,7 @@ int RegisterQMIDevice( sGobiUSBNet * pDev, int is9x15 )
       {
          return -1;
       }
-      RETURN_WHEN_DEVICE_ERR(pDev);
+      
       result = GetClientID( pDev, QMICTL ,NULL);
 
       if(gobi_kthread_should_stop())
@@ -5433,7 +5125,10 @@ int RegisterQMIDevice( sGobiUSBNet * pDev, int is9x15 )
          return -1;
       }
       
-      RETURN_WHEN_DEVICE_ERR(pDev);
+      if(pDev->mbUnload != eStatRegister)
+      {
+         return result;
+      }
       if (result != 0)
       {
          if(i++>MAX_RETRY)
@@ -5485,14 +5180,20 @@ int RegisterQMIDevice( sGobiUSBNet * pDev, int is9x15 )
       DBG( "Device unresponsive to QMI\n" );
       return -ETIMEDOUT;
    }
-   RETURN_WHEN_DEVICE_ERR(pDev);
+   if(pDev->mbUnload != eStatRegister)
+   {
+      return -EFAULT;
+   }
    // Initiate QMI CTL Sync Procedure
    DBG( "Sending QMI CTL Sync Request\n" );
    i=0;
    do
    {
       result = QMICTLSyncProc(pDev);
-      RETURN_WHEN_DEVICE_ERR(pDev);
+      if(isModuleUnload(pDev))
+      {
+         return -EFAULT;;
+      }
       if (result != 0)
       {
          if(i++>MAX_RETRY)
@@ -5537,7 +5238,10 @@ int RegisterQMIDevice( sGobiUSBNet * pDev, int is9x15 )
          {
             result = QMIWDASetDataFormat (pDev, eSKIP_TE_FLOW_CONTROL_TLV,pDev->iQMUXEnable);
          }
-         RETURN_WHEN_DEVICE_ERR(pDev);
+         if(isModuleUnload(pDev))
+         {
+            return -EFAULT;;
+         }
          if(i++>MAX_RETRY)
          {
             if(pDev->iDataMode==eDataMode_Ethernet)
@@ -5609,8 +5313,11 @@ int RegisterQMIDevice( sGobiUSBNet * pDev, int is9x15 )
    do
    {
       // Setup WDS callback
-      result = SetupQMIWDSCallback( pDev , 0 );
-      RETURN_WHEN_DEVICE_ERR(pDev);
+      result = SetupQMIWDSCallback( pDev );
+      if(isModuleUnload(pDev))
+      {
+         return -EFAULT;
+      }
       if (result != 0)
       {
          if(i++>MAX_RETRY)
@@ -5627,9 +5334,12 @@ int RegisterQMIDevice( sGobiUSBNet * pDev, int is9x15 )
        do
        {
           result = QMIDMSSWISetFCCAuth( pDev );
-          RETURN_WHEN_DEVICE_ERR(pDev);
+          if(pDev->mbUnload != eStatRegister)
+          {
+             return -EFAULT;;
+          }
           if (result != 0)
-          { 
+          {
             if(i++>MAX_RETRY)
             {
                return result;
@@ -5642,7 +5352,10 @@ int RegisterQMIDevice( sGobiUSBNet * pDev, int is9x15 )
    do
    {
       result = QMIDMSGetMEID( pDev );
-      RETURN_WHEN_DEVICE_ERR(pDev);
+      if(pDev->mbUnload != eStatRegister)
+      {
+          return -EFAULT;;
+      }
       if (result != 0)
       {
          if(i++>MAX_RETRY)
@@ -5658,7 +5371,10 @@ int RegisterQMIDevice( sGobiUSBNet * pDev, int is9x15 )
    do
    {
       result = QMICTLGetVersionInfo(pDev);
-      RETURN_WHEN_DEVICE_ERR(pDev);
+      if(isModuleUnload(pDev))
+      {
+         return -EFAULT;;
+      }
       if (result != 0)
       {
          if(i++ > MAX_RETRY)
@@ -5681,6 +5397,19 @@ int RegisterQMIDevice( sGobiUSBNet * pDev, int is9x15 )
    {
       return result;
    }
+   for(i=0;i<MAX_QCQMI;i++)
+   {
+       if (qcqmi_table[i] == 0)
+           break;
+   }
+   
+   if (i == MAX_QCQMI)
+   {
+       printk(KERN_WARNING "no free entry available at qcqmi_table array\n");
+       return -ENOMEM;
+   }
+   qcqmi_table[i] = 1;
+   pDev->mQMIDev.qcqmi = i;
 
    // Always print this output
    printk( KERN_INFO "creating qcqmi%d\n",
@@ -5728,13 +5457,6 @@ int RegisterQMIDevice( sGobiUSBNet * pDev, int is9x15 )
        return -ENOMEM;
    }
 
-  if(pDev->iIPAlias==0)
-  {
-      for(i=0;i<pDev->iMaxMuxID;i++)
-      {
-         SetupQMIWDSCallback( pDev,MUX_ID_START+i);
-      }
-  }   
   // Success
    return 0;
 }
@@ -5754,10 +5476,6 @@ RETURN VALUE:
 ===========================================================================*/
 void wakeup_target_process(struct task_struct * pTask)
 {
-   if(signal_group_exit(current->signal))
-   {
-      return ;
-   }
    if(pTask!=NULL)
    {
       struct list_head *list = NULL;
@@ -5868,10 +5586,6 @@ int CloseFileInode(sGobiUSBNet * pDev,int iCount)
     {
        list_for_each_entry(pOpenInode,&pDev->mQMIDev.mCdev.list,i_devices)
        {
-          if(!pOpenInode)
-          {
-             break;
-          }
           // Get the inode
           if (pOpenInode != NULL && (IS_ERR( pOpenInode ) == false))
           {
@@ -5883,7 +5597,8 @@ int CloseFileInode(sGobiUSBNet * pDev,int iCount)
                 int max_fds = 0;
                 if (pEachTask == NULL )
                 {
-                   break;
+                   // Some tasks may not have files (e.g. Xsession)
+                   continue;
                 }
                 if(pEachTask->files == NULL)
                 {
@@ -5898,10 +5613,10 @@ int CloseFileInode(sGobiUSBNet * pDev,int iCount)
                 // For each file this task has open, check if it's referencing
                 // our inode.
                 pFDT = files_fdtable( pEachTask->files );
+                max_fds = pFDT->max_fds;
                 if(pFDT)
                 {
                     int iFound = 0;
-                    max_fds = pFDT->max_fds;
                     for (count = 0; count < max_fds; count++)
                     {
                        if(pFDT==NULL)
@@ -6014,7 +5729,6 @@ int CloseFileInode(sGobiUSBNet * pDev,int iCount)
                                 DBG("ForceFilpClose:%d\n",pEachTask->pid);
                                 ForceFilpClose(pFilp);
                              }
-                             //Cannot return 1 here, task won't wakeup to close
                              if(reffrom>0)
                              {
                                  return 1;
@@ -6106,12 +5820,6 @@ void DeregisterQMIDevice( sGobiUSBNet * pDev )
       printk("preempt_disable");
       preempt_disable();
    }
-   #ifdef CONFIG_ANDROID
-   if(pDev)
-   {
-      gobiLockSystemSleep(pDev);
-   }
-   #endif
    pDev->mbUnload = eStatUnloading;
    qmux_table[pDev->iDeviceMuxID]=0;
    // Should never happen, but check anyway
@@ -6140,7 +5848,6 @@ void DeregisterQMIDevice( sGobiUSBNet * pDev )
                              0,
                              100 );
       pDev->mbUnload = eStatUnloaded;
-      release_qcqmi_from_table(pDev->mQMIDev.qcqmi);
       gobi_flush_work();
       return;
    }
@@ -6178,11 +5885,6 @@ void DeregisterQMIDevice( sGobiUSBNet * pDev )
    GobiDestoryWorkQueue(pDev);   
    if(pDev->WDSClientID!=(u16)-1)
    ReleaseClientID( pDev, pDev->WDSClientID );
-   for(i=0;i<MAX_MUX_NUMBER_SUPPORTED;i++)
-   {
-      if(pDev->QMUXWDSCientID[i] !=(u16)-1)
-         ReleaseClientID( pDev, pDev->QMUXWDSCientID[i]  );
-   }
 
    gobi_flush_work();
    wait_interrupt();
@@ -6258,9 +5960,8 @@ void DeregisterQMIDevice( sGobiUSBNet * pDev )
                msleep_interruptible(400);
             }
          }
-         #ifdef CONFIG_ANDROID
-         gobiStayAwake(pDev);
-         #endif         
+         
+         
       }
       else
       {
@@ -6276,7 +5977,6 @@ void DeregisterQMIDevice( sGobiUSBNet * pDev )
    if (pDev->mQMIDev.mbCdevIsInitialized == false)
    {
       pDev->mbUnload = eStatUnloaded;
-      release_qcqmi_from_table(pDev->mQMIDev.qcqmi);
       return;
    }
 
@@ -6339,23 +6039,17 @@ void DeregisterQMIDevice( sGobiUSBNet * pDev )
                       pDev->mQMIDev.mDevNum );
    }
 
-   release_qcqmi_from_table(pDev->mQMIDev.qcqmi);
+   qcqmi_table[pDev->mQMIDev.qcqmi] = 0;
 
    // Hold onto cdev memory location until everyone is through using it.
    // Timeout after 30 seconds (10 ms interval).  Timeout should never happen,
    // but exists to prevent an infinate loop just in case.
-   #ifdef CONFIG_ANDROID
-   for (tries = 0; tries < 10; tries++)
-   #else
+
    for (tries = 0; tries < 60; tries++)
-   #endif
    {
       int ref = gobi_atomic_read( &pDev->mQMIDev.mCdev.kobj.kref.refcount );
       if (ref > 1)
       {
-         #ifdef CONFIG_ANDROID
-         gobiStayAwake(pDev);
-         #endif
          wait_ms(500);
          ref = gobi_atomic_read( &pDev->mQMIDev.mCdev.kobj.kref.refcount );
          if(ref>1)
@@ -6437,22 +6131,7 @@ int QMIReady(
       {
          return -1;
       }
-      if(isModuleUnload(pDev))
-      {
-         if(pWriteBuffer)
-            kfree( pWriteBuffer );
-         return -EFAULT;
-      }
-      else if(IsDeviceDisconnect(pDev))
-      {
-         DBG( "Device Disconnected!\n" );
-         if(pWriteBuffer)
-            kfree( pWriteBuffer );
-         return -ENXIO;\
-      }
-      #ifdef CONFIG_ANDROID
-      gobiStayAwake(pDev);
-      #endif
+      
       // Start read
       transactionID =QMIXactionIDGet(pDev);
       
@@ -6492,27 +6171,13 @@ int QMIReady(
          LocalClientMemUnLockSpinLockIRQRestore ( pDev ,flags,__LINE__);
          return -1;
       }
-      if(isModuleUnload(pDev))
-      {
-         if(pWriteBuffer)
-            kfree( pWriteBuffer );
-         return -EFAULT;
-      }
-      else if(IsDeviceDisconnect(pDev))
-      {
-         DBG( "Device Disconnected!\n" );
-         if(pWriteBuffer)
-            kfree( pWriteBuffer );
-         return -ENXIO;\
-      }
 
       if(curTime < timeout)
       {
          int iScaleCount = 0;
          for(iScaleCount=0;iScaleCount<100;iScaleCount++)
          {
-            if( gobi_kthread_should_stop() ||
-                IsDeviceDisconnect(pDev) )
+            if( gobi_kthread_should_stop() )
             {
                if(pWriteBuffer)
                kfree(pWriteBuffer);
@@ -6523,8 +6188,7 @@ int QMIReady(
                return -1;
             }
             msleep( 10 );//wait_ms(10);//msleep( 10 );
-            if(gobi_kthread_should_stop()||
-                IsDeviceDisconnect(pDev))
+            if(gobi_kthread_should_stop())
             {
                if(pWriteBuffer)
                kfree(pWriteBuffer);
@@ -6705,46 +6369,11 @@ void QMIWDSCallback(
          {
             DBG( "Net device link is connected\n" );
             GobiClearDownReason( pDev, NO_NDIS_CONNECTION );
-            #ifdef CONFIG_ANDROID
-            SetTxRxStat(pDev, RESUME_RX_OKAY | RESUME_TX_OKAY);
-            #endif
          }
          else
          {
             DBG( "Net device link is disconnected\n" );
             GobiSetDownReason( pDev, NO_NDIS_CONNECTION );
-            #ifdef CONFIG_ANDROID
-            SetTxRxStat(pDev, RESUME_TX_RX_DISABLE);
-            #endif
-         }
-      }
-   }
-   if(pDev->WDSClientID == clientID)
-   {
-      DBG( "clientID :0x%04x\n", clientID);
-   }
-   else
-   {
-      int i =0;
-      for(i=0;i<MAX_MUX_NUMBER_SUPPORTED;i++)
-      {
-         if(pDev->QMUXWDSCientID[i]==clientID)
-         {
-            DBG( "0x%02x clientID :0x%04x %s\n",
-               i+MUX_ID_START,
-               clientID,
-               (pDev->bLinkState == true) ? "connected" : "disconnected");
-            if(pDev->iIPAlias==0)
-            {
-               if(pDev->bLinkState == true)
-               {
-                  netif_carrier_on( pDev->pNetDevice[i] );
-               }
-               else
-               {
-                  netif_carrier_off( pDev->pNetDevice[i] );
-               }
-            }
          }
       }
    }
@@ -6758,12 +6387,6 @@ void QMIWDSCallback(
                        0,
                        QMIWDSCallback,
                        pData ,0);
-   #ifdef CONFIG_ANDROID
-   if(pDev)
-   {
-      PRINT_WS_LOCK(pDev->ws);
-   }
-   #endif
 
    if (result != 0)
    {
@@ -6836,21 +6459,23 @@ DESCRIPTION:
 
 PARAMETERS:
    pDev     [ I ] - Device specific memory
-   QMUXID   [ I ] - QMUX ID
 
 RETURN VALUE:
    int - 0 for success
          Negative errno for failure
 ===========================================================================*/
-int SetupQMIWDSCallback( sGobiUSBNet * pDev  ,u8 QMUXID)
+int SetupQMIWDSCallback( sGobiUSBNet * pDev )
 {
    int result;
    void * pWriteBuffer;
    u16 writeBufferSize;
    u16 WDSClientID;
-   u16 tid = 1+QMUXID;
 
-   RETURN_WHEN_DEVICE_ERR(pDev);
+   if (IsDeviceValid( pDev ) == false)
+   {
+      DBG( "Invalid device\n" );
+      return -EFAULT;
+   }
 
    result = GetClientID( pDev, QMIWDS,NULL );
    if (result < 0)
@@ -6858,45 +6483,7 @@ int SetupQMIWDSCallback( sGobiUSBNet * pDev  ,u8 QMUXID)
       return result;
    }
    pDev->WDSClientID = WDSClientID = result;
-   if(QMUXID>=MUX_ID_START)
-   {
-      pDev->QMUXWDSCientID[QMUXID-MUX_ID_START] = WDSClientID = result;
-      DBG( "MUXID:0x%02x, WDSClientID:0x%04x\n",QMUXID, WDSClientID);
-   }
-   else
-   {
-      pDev->WDSClientID = WDSClientID = result;
-      DBG("WDSClientID:0x%04x",WDSClientID);
-   }
-   // QMI WDS Set QMUX ID
-   if(QMUXID>=MUX_ID_START)
-   {
-      writeBufferSize = QMIWDSSetQMuxIDReqSize();
-      pWriteBuffer = kmalloc( writeBufferSize, GOBI_GFP_KERNEL );
-      if (pWriteBuffer == NULL)
-      {
-         return -ENOMEM;
-      }
-      result = QMIWDSSetQMuxIDReq( pWriteBuffer,
-                                     writeBufferSize,
-                                     tid++,
-                                     QMUXID);
-      if (result < 0)
-      {
-         kfree( pWriteBuffer );
-         return result;
-      }
-      result = WriteSync( pDev,
-                       pWriteBuffer,
-                       writeBufferSize,
-                       WDSClientID );
-      kfree( pWriteBuffer );
- 
-      if (result < 0)
-      {
-         return result;
-      }
-   }
+
    // QMI WDS Set Event Report
    writeBufferSize = QMIWDSSetEventReportReqSize();
    pWriteBuffer = kmalloc( writeBufferSize, GOBI_GFP_KERNEL );
@@ -6907,7 +6494,7 @@ int SetupQMIWDSCallback( sGobiUSBNet * pDev  ,u8 QMUXID)
 
    result = QMIWDSSetEventReportReq( pWriteBuffer,
                                      writeBufferSize,
-                                     tid++ );
+                                     1 );
    if (result < 0)
    {
       kfree( pWriteBuffer );
@@ -6935,7 +6522,7 @@ int SetupQMIWDSCallback( sGobiUSBNet * pDev  ,u8 QMUXID)
 
    result = QMIWDSGetPKGSRVCStatusReq( pWriteBuffer,
                                        writeBufferSize,
-                                       tid++ );
+                                       2 );
    if (result < 0)
    {
       kfree( pWriteBuffer );
@@ -6995,8 +6582,11 @@ int QMIDMSSWISetFCCAuth( sGobiUSBNet * pDev )
    unsigned long flags;
    DBG("\n");
 
-   RETURN_WHEN_DEVICE_ERR(pDev);
-
+   if (IsDeviceValid( pDev ) == false)
+   {
+      DBG( "Invalid device\n" );
+      return -EFAULT;
+   }
    sema_init( &readSem, SEMI_INIT_DEFAULT_VALUE );
    mb();
 
@@ -7021,7 +6611,6 @@ int QMIDMSSWISetFCCAuth( sGobiUSBNet * pDev )
    if (result < 0)
    {
       kfree( pWriteBuffer );
-      pWriteBuffer = NULL;
       return result;
    }
 
@@ -7032,11 +6621,7 @@ int QMIDMSSWISetFCCAuth( sGobiUSBNet * pDev )
                     pWriteBuffer,
                     writeBufferSize,
                     DMSClientID );
-   }
-   if(pWriteBuffer)
-   {
       kfree( pWriteBuffer );
-      pWriteBuffer = NULL;
    }
    wait_control_msg_semaphore_timeout(&readSem,QMI_CONTROL_MAX_MSG_DELAY_MS);
    mb();
@@ -7118,7 +6703,11 @@ int QMIDMSGetMEID( sGobiUSBNet * pDev )
    unsigned long flags;
    struct semaphore readSem;
 
-   RETURN_WHEN_DEVICE_ERR(pDev);
+   if (IsDeviceValid( pDev ) == false)
+   {
+      DBG( "Invalid device\n" );
+      return -EFAULT;
+   }
 
    sema_init( &readSem, SEMI_INIT_DEFAULT_VALUE );
    mb();
@@ -7143,7 +6732,6 @@ int QMIDMSGetMEID( sGobiUSBNet * pDev )
    if (result < 0)
    {
       kfree( pWriteBuffer );
-      pWriteBuffer = NULL;
       return result;
    }
 
@@ -7154,11 +6742,7 @@ int QMIDMSGetMEID( sGobiUSBNet * pDev )
                     pWriteBuffer,
                     writeBufferSize,
                     DMSClientID );
-   }
-   if(pWriteBuffer)
-   {
       kfree( pWriteBuffer );
-      pWriteBuffer = NULL;
    }
    wait_control_msg_semaphore_timeout(&readSem,QMI_CONTROL_MAX_MSG_DELAY_MS);
    mb();
@@ -7251,7 +6835,6 @@ int QMICTLSetDataFormat( sGobiUSBNet * pDev )
    unsigned long flags;
 
    //DBG("\n");
-   RETURN_WHEN_DEVICE_ERR(pDev);
 
    // Send SET DATA FORMAT REQ
    writeBufferSize = QMICTLSetDataFormatReqSize();
@@ -7390,7 +6973,6 @@ int QMIWDASetQMAP( sGobiUSBNet * pDev , u16 WDAClientID)
    if (result < 0)
    {
       kfree( pWriteBuffer );
-      pWriteBuffer = NULL;
       return result;
    }
 
@@ -7401,11 +6983,7 @@ int QMIWDASetQMAP( sGobiUSBNet * pDev , u16 WDAClientID)
                           pWriteBuffer,
                           writeBufferSize,
                           WDAClientID );
-   }
-   if(pWriteBuffer)
-   {
       kfree( pWriteBuffer );
-      pWriteBuffer = NULL;
    }
    if (result < 0)
    {
@@ -7480,8 +7058,6 @@ int QMICTLGetVersionInfo( sGobiUSBNet * pDev )
    unsigned long flags;
 
    DBG("\n");
-
-   RETURN_WHEN_DEVICE_ERR(pDev);
 
    // Send CTL GET VERSION INFO REQ
    writeBufferSize = QMICTLGetVersionInfoReqSize();
@@ -7617,7 +7193,11 @@ int QMIWDASetDataFormat( sGobiUSBNet * pDev, int te_flow_control , int iqmuxenab
    u16 uTID=1;
    //DBG("\n");
 
-   RETURN_WHEN_DEVICE_ERR(pDev);
+   if (IsDeviceValid( pDev ) == false)
+   {
+      DBG( "Invalid device\n" );
+      return -EFAULT;
+   }
    barrier();
    sema_init( &readSem, SEMI_INIT_DEFAULT_VALUE );
    mb();
@@ -7658,11 +7238,7 @@ int QMIWDASetDataFormat( sGobiUSBNet * pDev, int te_flow_control , int iqmuxenab
                           pWriteBuffer,
                           writeBufferSize,
                           WDAClientID );
-   }
-   if(pWriteBuffer)
-   {
       kfree( pWriteBuffer );
-      pWriteBuffer = NULL;
    }
    if (result < 0)
    {
@@ -7957,12 +7533,7 @@ int SetPowerSaveMode(sGobiUSBNet *pDev,u8 mode)
       printk(KERN_ERR "Invalid device!\n" );
       return -ENXIO;
    }
-
-   if(iIsRemoteWakeupSupport(pDev->mpNetDev)==0)
-   {
-      DBG("remote wakeup not supported\n");
-      return 0;
-   }
+   
    sema_init( &readSem, SEMI_INIT_DEFAULT_VALUE );
    mb();
    writeBufferSize = QMICTLSetPowerSaveModeReqSize();
@@ -8184,10 +7755,6 @@ int WriteSyncNoResume(
        else if(result < 0 )
        {
           DBG( "%s no device!\n" ,__FUNCTION__);
-          if(!signal_pending(current))
-          {
-            pDev->iUSBState = USB_STATE_NOTATTACHED;
-          }
            return result;
        }
        else
@@ -8207,7 +7774,7 @@ int WriteSyncNoResume(
    }
 
    // Write is done, release device
-   UsbAutopmPutInterface(pDev->mpIntf);
+   gobi_usb_autopm_put_interface( pDev->mpIntf );
    return result;
 }
 
@@ -8255,13 +7822,6 @@ int ConfigPowerSaveSettings(sGobiUSBNet *pDev, u8 service, u8 indication)
       DBG( "Invalid device!\n" );
       return -ENXIO;
    }
-   
-   if(iIsRemoteWakeupSupport(pDev->mpNetDev)==0)
-   {
-      DBG("remote wakeup not supported\n");
-      return 0;
-   }
-   
    sema_init( &readSem, SEMI_INIT_DEFAULT_VALUE );
    mb();
 
@@ -8511,10 +8071,6 @@ int WriteSyncNoRetry(
    else if(result < 0 )
    {
       DBG( "%s no device!\n" ,__FUNCTION__);
-      if(!signal_pending(current))
-      {
-         pDev->iUSBState = USB_STATE_NOTATTACHED;
-      }
       gobi_usb_autopm_put_interface( pDev->mpIntf );
        return result;
    }
@@ -8569,14 +8125,6 @@ bool IsDeviceDisconnect(sGobiUSBNet *pDev)
    if(!pDev)
       return true;
    mb();
-   if(pDev->iUSBState == USB_STATE_NOTATTACHED)
-      return true;
-   if(pDev->iIsUSBReset)
-   {
-      pDev->iUSBState = USB_STATE_NOTATTACHED;
-      mb();
-      return true;
-   }
    #if (LINUX_VERSION_CODE >= KERNEL_VERSION( 2,6,33 ))
    if(pDev->mpIntf==NULL)
    {
@@ -8589,7 +8137,8 @@ bool IsDeviceDisconnect(sGobiUSBNet *pDev)
       return true;
    }
    #endif
-
+   if(pDev->iUSBState == USB_STATE_NOTATTACHED)
+      return true;
    if(!interface_to_usbdev(pDev->mpIntf))
       return true;
    if (interface_to_usbdev(pDev->mpIntf)->state == USB_STATE_NOTATTACHED )
@@ -8655,20 +8204,6 @@ void gobi_usb_autopm_get_interface_no_resume(struct usb_interface *intf)
    #endif
 }
 
-void gobi_usb_autopm_put_interface_no_resume(struct usb_interface *intf)
-{
-   if(IsInterfacefDisconnected(intf))
-   {
-      return ;
-   }
-   #if (LINUX_VERSION_CODE < KERNEL_VERSION( 3,0,0 ))
-   usb_autopm_put_interface_async(intf);
-   return ;
-   #else
-   usb_autopm_put_interface_no_suspend(intf);
-   #endif
-}
-
 #if (LINUX_VERSION_CODE < KERNEL_VERSION( 2,6,29 ))
 void usb_autopm_put_interface_async(struct usb_interface *intf)
 {
@@ -8716,11 +8251,6 @@ struct net_device* gobi_qmimux_register_device(struct net_device *real_dev,int i
    new_dev = alloc_netdev(sizeof(struct gobi_qmimux_priv),
                           szName, ether_setup);
    #endif
-   if(!new_dev)
-   {
-      printk(KERN_WARNING "Memory error alloc netdev");
-      return NULL;
-   }
    new_dev->netdev_ops = &gobi_qmimux_netdev_ops;
    new_dev->flags           = IFF_NOARP | IFF_MULTICAST;
    random_ether_addr(new_dev->dev_addr);
@@ -9284,20 +8814,6 @@ int GobiInitWorkQueue(sGobiUSBNet *pGobiDev)
       }
       SetPrivateWorkQueuesWQByTableIndex(tableindex,interfaceindex,pGobiDev->wqProcessReadCallback,eWQ_URBCB);
    }
-   #ifdef CONFIG_ANDROID
-   pGobiDev->wqLockSystemSleep = create_workqueue(szProcessName);
-   if (!pGobiDev->wqLockSystemSleep)
-   {
-      printk("Create Work Queue LockSystemSleep Failed\n");
-      return -1;
-   }
-   pGobiDev->wqUnLockSystemSleep = create_workqueue(szProcessName);
-   if (!pGobiDev->wqUnLockSystemSleep)
-   {
-      printk("Create Work Queue UnLockSystemSleep Failed\n");
-      return -1;
-   }
-   #endif
    return 0;
 }
 
@@ -9315,23 +8831,88 @@ RETURN VALUE:
 ===========================================================================*/
 void GobiDestoryWorkQueue(sGobiUSBNet *pGobiDev)
 {
+   struct usb_device *dev = NULL;
    int interfaceindex = 0;
    int tableindex = 0;
+   unsigned int flag = 0;
+   int ret = -1;
    if(pGobiDev==NULL)
       return ;
+   dev = interface_to_usbdev(pGobiDev->mUsb_Interface);
    
    interfaceindex = GetPrivateWorkQueuesInterfaceTableIndex(pGobiDev);
    tableindex = GetPrivateWorkQueuesIndex(pGobiDev);
+   if(pGobiDev->wqProcessReadCallback!=NULL)
+   {
+      flag = gobi_work_busy(&pGobiDev->dwProcessReadCallback);
+      if(flag)
+      {
+         #if (LINUX_VERSION_CODE >= KERNEL_VERSION( 2,6,36 ))
+         if(flag & WORK_BUSY_RUNNING)
+         {
+            DBG("flush_delayed_work ReadCallback %d\n",interfaceindex);
+            flush_delayed_work(&pGobiDev->dwProcessReadCallback);
+         }
+         #endif
+         if(cancel_delayed_work (&pGobiDev->dwProcessReadCallback))
+         {
+            DBG("flush_workqueue ReadCallback %d\n",interfaceindex);
+            flush_workqueue(pGobiDev->wqProcessReadCallback);
+         }
+         
+         pGobiDev->wqProcessReadCallback = NULL;
+         SetPrivateWorkQueuesWQByTableIndex(tableindex,interfaceindex,NULL,eWQ_URBCB);
+      }
+      else
+      {
+         DBG("flush_work ReadCallback\n %d\n",interfaceindex);
+         flush_work(&pGobiDev->dwProcessReadCallback.work);
+         SetPrivateWorkQueuesWQByTableIndex(tableindex,interfaceindex,NULL,eWQ_URBCB);
+         pGobiDev->wqProcessReadCallback = NULL;
+      }
+   }
    
-   GobiCancelReadCallBackWorkQueue(pGobiDev);
-
-   GobiCancelProbeWorkQueue(pGobiDev);
-   #ifdef CONFIG_ANDROID   
-   GobiCancelLockSystemSleepWorkQueue(pGobiDev);
-   GobiCancelUnLockSystemSleepWorkQueue(pGobiDev);
-   #endif
+   if(pGobiDev->wqprobe!=NULL)
+   {
+      DBG("%s _lock_device_for_reset  %d\n",__FUNCTION__,interfaceindex);
+      ret = usb_lock_device_for_reset(dev, NULL);
+      if(ret==0)
+      {
+         //Prevent Deadlock GobiUSBLockReset
+         usb_unlock_device(dev);
+         DBG("%s usb_unlock_device  %d\n",__FUNCTION__,interfaceindex);
+         flag = gobi_work_busy(&pGobiDev->dwprobe);
+         if(flag)
+         {
+            #if (LINUX_VERSION_CODE >= KERNEL_VERSION( 2,6,36 ))
+            if(flag & WORK_BUSY_RUNNING)
+            {
+               DBG("flush_delayed_work probe %d\n",interfaceindex);
+               flush_delayed_work(&pGobiDev->dwprobe);
+            }
+            #endif
+            DBG("cancel_delayed_work probe %d\n",interfaceindex);
+            if(cancel_delayed_work(&pGobiDev->dwprobe))
+            {
+               DBG("flush_workqueue probe %d\n",interfaceindex);
+               flush_workqueue(pGobiDev->wqprobe);
+               DBG("destroy_workqueue probe\n");
+            }
+            SetPrivateWorkQueuesWQByTableIndex(tableindex,interfaceindex,NULL,eWQ_PROBE);
+            pGobiDev->wqprobe = NULL;
+         }
+         else
+         {
+            DBG("flush_work probe %d\n",interfaceindex);
+            flush_work(&pGobiDev->dwprobe.work);
+            pGobiDev->wqprobe = NULL;
+            SetPrivateWorkQueuesWQByTableIndex(tableindex,interfaceindex,NULL,eWQ_PROBE);
+         }  
+      }
+   }
+      
    ClearPrivateWorkQueuesProcessByTableIndex(tableindex,
-                  interfaceindex);
+                  tableindex);
    
 }
 
@@ -9609,199 +9190,6 @@ static void gobiProcessReadURB(sGobiUSBNet *pGobiDev)
             ProcessReadWorkFunction);
    queue_delayed_work(pGobiDev->wqProcessReadCallback, &pGobiDev->dwProcessReadCallback, 0);
 }
-#ifdef CONFIG_ANDROID
-/*===========================================================================
-ProcessLockSystemSleepFunction
-
-   ProcessLockSystemSleepFunction (Private Method)
-
-DESCRIPTION:
-   Process ReadCallback. 
-
-PARAMETERS:
-   w                 [ I ] - Pointer to work_struct pointer
-RETURN VALUE:
-   none
-===========================================================================*/
-static void ProcessLockSystemSleepFunction(struct work_struct *w)
-{
-   struct delayed_work *dwork;
-   sGobiUSBNet *pGobiDev = NULL;
-   dwork = to_delayed_work(w);
-   pGobiDev = container_of(dwork, sGobiUSBNet, dwLockSystemSleep);
-   if(pGobiDev!=NULL)
-   {
-      gobiStayAwake(pGobiDev);
-   }
-   else
-   {
-      DBG("pGobiDev NULL\n");
-   }
-}
-
-/*===========================================================================
-gobiLockSystemSleep
-
-
-   gobiLockSystemSleep (Private Method)
-
-DESCRIPTION:
-   Add delayed work to wqProcessReadCallback.
-
-PARAMETERS:
-   pGobiDev                 [ I ] - Pointer to sGobiUSBNet pointer
-RETURN VALUE:
-   none
-===========================================================================*/
-void gobiLockSystemSleep(sGobiUSBNet *pGobiDev)
-{
-   WLDEBUG("gobiLockSystemSleep\n");
-   GobiCancelLockSystemSleepWorkQueue(pGobiDev);
-   INIT_DELAYED_WORK(&pGobiDev->dwLockSystemSleep,
-            ProcessLockSystemSleepFunction);
-   queue_delayed_work(pGobiDev->wqLockSystemSleep, &pGobiDev->dwLockSystemSleep, 0);
-}
-
-/*===========================================================================
-gobiPmRelax
-
-   gobiPmRelax (Private Method)
-
-DESCRIPTION:
-   run __pm_relax. 
-
-PARAMETERS:
-   pGobiDev                 [ I ] - Pointer to sGobiUSBNet pointer
-RETURN VALUE:
-   none
-===========================================================================*/
-void gobiPmRelax(sGobiUSBNet *pGobiDev)
-{
-   if(pGobiDev)
-   {
-      struct wakeup_source *ws = pGobiDev->ws;
-      if(ws)
-      {
-         PRINT_WS_LOCK(ws);
-         WLDEBUG("__pm_relax start\n");
-         __pm_relax(ws);
-         WLDEBUG("__pm_relax end\n");
-         PRINT_WS_LOCK(ws);
-      }
-   }   
-}
-
-/*===========================================================================
-Gobi_pm_stay_awake
-
-   Gobi_pm_stay_awake (Private Method)
-
-DESCRIPTION:
-   run __pm_stay_awake. 
-
-PARAMETERS:
-   ws                 [ I ] - Pointer to wakeup_source pointer
-RETURN VALUE:
-   none
-===========================================================================*/
-void Gobi_pm_stay_awake(struct wakeup_source *ws)
-{
-   if(ws)
-   {
-      if(!ws->active)
-      {
-         WLDEBUG("__pm_stay_awake start\n");
-         __pm_stay_awake(ws);
-         WLDEBUG( "__pm_stay_awake complete\n");
-      }
-      PRINT_WS_LOCK(ws);
-   }
-}
-
-/*===========================================================================
-gobiStayAwake
-
-   gobiStayAwake (Private Method)
-
-DESCRIPTION:
-   Keep system stay awake not suspend. 
-
-PARAMETERS:
-   ws                 [ I ] - Pointer to wakeup_source pointer
-RETURN VALUE:
-   none
-===========================================================================*/
-void gobiStayAwake(sGobiUSBNet *pGobiDev)
-{
-   if (GobiTestDownReason( pGobiDev, DRIVER_SUSPENDED ) == false)
-   {
-      WLDEBUG( "pm_stay_awake\n");
-      pm_stay_awake(&pGobiDev->mpIntf->dev);
-   }
-   if(pGobiDev)
-   {
-      struct wakeup_source *ws = pGobiDev->ws;
-      if(ws)
-      {
-         Gobi_pm_stay_awake(ws);  
-      }
-   }
-}
-
-/*===========================================================================
-ProcessUnLockSystemSleepFunction
-
-   ProcessUnLockSystemSleepFunction (Private Method)
-
-DESCRIPTION:
-   Work queue handler to release wake lock. 
-
-PARAMETERS:
-   w                 [ I ] - Pointer to work_struct pointer
-RETURN VALUE:
-   none
-===========================================================================*/
-static void ProcessUnLockSystemSleepFunction(struct work_struct *w)
-{
-   struct delayed_work *dwork;
-   sGobiUSBNet *pGobiDev = NULL;
-   dwork = to_delayed_work(w);
-   pGobiDev = container_of(dwork, sGobiUSBNet, dwUnLockSystemSleep);
-   if(pGobiDev!=NULL)
-   {
-      WLDEBUG( "gobiPmRelax\n");
-      gobiPmRelax(pGobiDev);
-   }
-   else
-   {
-      DBG("pGobiDev NULL\n");
-   }
-}
-
-/*===========================================================================
-gobiUnLockSystemSleep
-
-   gobiUnLockSystemSleep (Private Method)
-
-DESCRIPTION:
-   Add delayed work to wqProcessReadCallback.
-
-PARAMETERS:
-   pGobiDev                 [ I ] - Pointer to sGobiUSBNet pointer
-RETURN VALUE:
-   none
-===========================================================================*/
-void gobiUnLockSystemSleep(sGobiUSBNet *pGobiDev)
-{
-   WLDEBUG( "gobiUnLockSystemSleep\n");
-   GobiCancelUnLockSystemSleepWorkQueue(pGobiDev);
-   INIT_DELAYED_WORK(&pGobiDev->dwUnLockSystemSleep,
-            ProcessUnLockSystemSleepFunction);
-   queue_delayed_work(pGobiDev->wqUnLockSystemSleep, &pGobiDev->dwUnLockSystemSleep, DELAY_MS_DEFAULT);
-}
-#endif
-
-
 /*===========================================================================
 GenerateProcessName
 
@@ -10143,69 +9531,36 @@ RETURN VALUE:
 ===========================================================================*/
 void GobiCancelReadCallBackWorkQueue(sGobiUSBNet *pGobiDev)
 {
-   if( (pGobiDev != NULL) && 
-      (pGobiDev->wqProcessReadCallback != NULL))
+   if(pGobiDev->wqProcessReadCallback!=NULL)
    {
-      
-      DBG("%s\n",__FUNCTION__);
-      GobiCancelDelayWorkWorkQueue(pGobiDev,
-         pGobiDev->wqProcessReadCallback,
-         &pGobiDev->dwProcessReadCallback);
+      unsigned int flag = gobi_work_busy(&pGobiDev->dwProcessReadCallback);
+      if(flag)
+      {
+         #if (LINUX_VERSION_CODE >= KERNEL_VERSION( 2,6,36 ))
+         if(flag & WORK_BUSY_RUNNING)
+         {
+            DBG("flush_delayed_work ReadCallback %d\n",
+                pGobiDev->mpIntf->cur_altsetting->desc.bInterfaceNumber);
+            flush_delayed_work(&pGobiDev->dwProcessReadCallback);
+         }
+         #endif
+         if(cancel_delayed_work (&pGobiDev->dwProcessReadCallback))
+         {
+            DBG("flush_workqueue ReadCallback %d\n",
+                pGobiDev->mpIntf->cur_altsetting->desc.bInterfaceNumber);
+            flush_workqueue(pGobiDev->wqProcessReadCallback);
+         }
+      }
+      else
+      {
+         DBG("flush_work ReadCallback\n %d\n",
+            pGobiDev->mpIntf->cur_altsetting->desc.bInterfaceNumber);
+         flush_work(&pGobiDev->dwProcessReadCallback.work);
+      }
    }
 }
-#ifdef CONFIG_ANDROID
-/*===========================================================================
-GobiCancelReadCallBackWorkQueue
 
-   GobiCancelLockSystemSleepWorkQueue (Private Method)
 
-DESCRIPTION:
-   Cancel device LockSystemSleep work queue.
-
-PARAMETERS:
-   pGobiDev          [ I ] - pointer to sGobiUSBNet.
-RETURN VALUE:
-    none
-===========================================================================*/
-void GobiCancelLockSystemSleepWorkQueue(sGobiUSBNet *pGobiDev)
-{
-   if( (pGobiDev != NULL) && 
-      (pGobiDev->wqLockSystemSleep != NULL))
-   {
-      
-      DBG("%s\n",__FUNCTION__);
-      GobiCancelDelayWorkWorkQueueWithoutUSBLockDevice(pGobiDev,
-         pGobiDev->wqLockSystemSleep,
-         &pGobiDev->dwLockSystemSleep);
-   }
-} 
-
-/*===========================================================================
-GobiCancelUnLockSystemSleepWorkQueue
-
-   GobiCancelUnLockSystemSleepWorkQueue (Private Method)
-
-DESCRIPTION:
-   Cancel device LockSystemSleep work queue.
-
-PARAMETERS:
-   pGobiDev          [ I ] - pointer to sGobiUSBNet.
-RETURN VALUE:
-    none
-===========================================================================*/
-void GobiCancelUnLockSystemSleepWorkQueue(sGobiUSBNet *pGobiDev)
-{
-   if( (pGobiDev != NULL) && 
-      (pGobiDev->wqUnLockSystemSleep != NULL))
-   {
-      
-      DBG("%s\n",__FUNCTION__);
-      GobiCancelDelayWorkWorkQueueWithoutUSBLockDevice(pGobiDev,
-         pGobiDev->wqUnLockSystemSleep,
-         &pGobiDev->dwUnLockSystemSleep);
-   }
-} 
-#endif
 /*===========================================================================
 METHOD:
    TransceiveReleaseClientID (Private Method)
@@ -10284,11 +9639,8 @@ bool TransceiveReleaseClientID(
                if(result<0)
                {
                   DBG( " WriteSyncNoRetry error %d\n", result );
-                  if(-ERESTARTSYS!=result)
-                  {
-                     pDev->mReleaseClientIDFail = 1;
-                     bRet = false;
-                  }
+                  pDev->mReleaseClientIDFail = 1;
+                  bRet = false;
                   flags = LocalClientMemLockSpinLockIRQSave( pDev , __LINE__);
                   RemoveAndPopNotifyList(pDev,QMICTL,0,eClearCID);
                   LocalClientMemUnLockSpinLockIRQRestore ( pDev ,flags,__LINE__);
@@ -10339,394 +9691,9 @@ bool TransceiveReleaseClientID(
                   LocalClientMemUnLockSpinLockIRQRestore ( pDev ,flags,__LINE__);
                }
             }
-            else
-            {
-                if(pWriteBuffer)
-                {
-                   kfree( pWriteBuffer );
-                   pWriteBuffer = NULL;
-                }
-            }
          } 
       }
    }
    return bRet;
-}
-
-/*===========================================================================
-GobiCancelDelayWorkWorkQueueWithoutUSBLockDevice
-
-
-   GobiCancelDelayWorkWorkQueueWithoutUSBLockDevice (Private Method)
-
-DESCRIPTION:
-   Cancel work queue and delayed work.
-
-PARAMETERS:
-   pGobiDev          [ I ] - pointer to sGobiUSBNet.
-   wq                [ I ] - pointer to workqueue_struct.
-   dw                [ I ] - pointer to delayed_work.
-
-RETURN VALUE:
-    none
-===========================================================================*/
-void GobiCancelDelayWorkWorkQueueWithoutUSBLockDevice(
-   sGobiUSBNet *pGobiDev,
-   struct workqueue_struct *wq, 
-   struct delayed_work *dw)
-{
-   if( (pGobiDev != NULL) && 
-      (wq != NULL) && 
-      (dw != NULL) )
-   {
-      struct usb_device *dev = NULL;
-      unsigned int flag = 0;
-      if( pGobiDev->mUsb_Interface == NULL )
-      {
-         return ;
-      }
-      dev = interface_to_usbdev(pGobiDev->mUsb_Interface);
-      flag = gobi_work_busy(dw);
-      if(flag)
-      {
-         #if (LINUX_VERSION_CODE >= KERNEL_VERSION( 2,6,36 ))
-         if(flag & WORK_BUSY_RUNNING)
-         {
-            DBG("flush_delayed_work %d\n",
-                pGobiDev->mpIntf->cur_altsetting->desc.bInterfaceNumber);
-            flush_delayed_work(dw);
-         }
-         #endif
-         if(cancel_delayed_work (dw))
-         {
-            DBG("flush_workqueue %d\n",
-                pGobiDev->mpIntf->cur_altsetting->desc.bInterfaceNumber);
-            flush_workqueue(wq);
-         }
-      }
-      else
-      {
-         DBG("flush_work \n %d\n",
-            pGobiDev->mpIntf->cur_altsetting->desc.bInterfaceNumber);
-         if(!dw->work.func)
-         {
-            return ;
-         }
-         flush_work(&dw->work);
-      }
-   }
-}
-
-/*===========================================================================
-GobiCancelDelayWorkWorkQueue
-
-   GobiCancelDelayWorkWorkQueue (Private Method)
-
-DESCRIPTION:
-   Cancel work queue and delayed work.
-
-PARAMETERS:
-   pGobiDev          [ I ] - pointer to sGobiUSBNet.
-   wq                [ I ] - pointer to workqueue_struct.
-   dw                [ I ] - pointer to delayed_work.
-
-RETURN VALUE:
-    none
-===========================================================================*/
-void GobiCancelDelayWorkWorkQueue(
-   sGobiUSBNet *pGobiDev,
-   struct workqueue_struct *wq, 
-   struct delayed_work *dw)
-{
-   if( (pGobiDev != NULL) && 
-      (wq != NULL) && 
-      (dw != NULL) )
-   {
-      
-      int ret = 0;
-      struct usb_device *dev = NULL;
-      unsigned int flag = 0;
-      if( pGobiDev->mUsb_Interface == NULL )
-      {
-         return ;
-      }
-      dev = interface_to_usbdev(pGobiDev->mUsb_Interface);
-      ret = usb_lock_device_for_reset(dev, NULL);
-      if( (ret==0) ||
-          (pGobiDev->iIsUSBReset==false) )
-      {
-         if(ret==0)
-         {
-            //Prevent Deadlock GobiUSBLockReset
-            usb_unlock_device(dev);
-         }
-         flag = gobi_work_busy(dw);
-         if(flag)
-         {
-            #if (LINUX_VERSION_CODE >= KERNEL_VERSION( 2,6,36 ))
-            if(flag & WORK_BUSY_RUNNING)
-            {
-               DBG("flush_delayed_work %d\n",
-                   pGobiDev->mpIntf->cur_altsetting->desc.bInterfaceNumber);
-               flush_delayed_work(dw);
-            }
-            #endif
-            if(cancel_delayed_work (dw))
-            {
-               DBG("flush_workqueue %d\n",
-                   pGobiDev->mpIntf->cur_altsetting->desc.bInterfaceNumber);
-               flush_workqueue(wq);
-            }
-         }
-         else
-         {
-            DBG("flush_work \n %d\n",
-               pGobiDev->mpIntf->cur_altsetting->desc.bInterfaceNumber);
-            if(!dw->work.func)
-            {
-               return ;
-            }
-            flush_work(&dw->work);
-         }
-      }
-   }
-}
-
-/*===========================================================================
-GobiCancelProbeWorkQueue
-
-   GobiCancelProbeWorkQueue (Private Method)
-
-DESCRIPTION:
-   Cancel device Probe work queue.
-
-PARAMETERS:
-   pGobiDev          [ I ] - pointer to sGobiUSBNet.
-RETURN VALUE:
-    none
-===========================================================================*/
-void GobiCancelProbeWorkQueue(sGobiUSBNet *pGobiDev)
-{
-   if( (pGobiDev != NULL) && 
-      (pGobiDev->wqprobe != NULL))
-   {
-      
-      DBG("%s\n",__FUNCTION__);
-      GobiCancelDelayWorkWorkQueue(pGobiDev,
-         pGobiDev->wqprobe,
-         &pGobiDev->dwprobe);
-   }
-}
-#ifdef CONFIG_ANDROID
-//Don't do this before SetCurrentSuspendStat
-void SetTxRxStat(sGobiUSBNet *pGobiDev,int state)
-{
-   unsigned long flags = 0;
-   spin_lock_irqsave(&pGobiDev->sSuspendLock,flags);
-   if(state==RESUME_TX_RX_DISABLE)
-   {
-      pGobiDev->iSuspendReadWrite = RESUME_TX_RX_DISABLE;
-   }
-   else
-   {
-      pGobiDev->iSuspendReadWrite |= state;
-      DBG("%s ON\n",(state==RESUME_RX_OKAY)? "Rx" : "Tx");
-   }
-   spin_unlock_irqrestore(&pGobiDev->sSuspendLock,flags);
-
-}
-
-int GetTxRxStat(sGobiUSBNet *pGobiDev,int Channel)
-{
-   if(Channel & RESUME_RX_OKAY)
-   {
-      return (pGobiDev->iSuspendReadWrite & RESUME_RX_OKAY);
-   }
-   if(Channel & RESUME_TX_OKAY)
-   {
-      return (pGobiDev->iSuspendReadWrite & RESUME_TX_OKAY);
-   }
-   DBG( "%s OFF\n",(Channel==RESUME_RX_OKAY)? "Rx" : "Tx");
-   return 0;
-}
-#endif
-
-/*===========================================================================
-isFilpSignalPending
-
-   isFilpSignalPending (Private Method)
-
-DESCRIPTION:
-   Check Signal pending on filp task.
-
-PARAMETERS:
-   pFilpData          [ I ] - pointer to sQMIFilpStorage.
-RETURN VALUE:
-   true - singnal pending on filp task.
-   false - no singnal pending.
-===========================================================================*/
-bool isFilpSignalPending(sQMIFilpStorage *pFilpData)
-{
-   struct task_struct *pOpenTask = NULL;
-   struct task_struct *pReadTask = NULL;
-   struct task_struct *pWriteTask = NULL;
-   struct task_struct *pIOCTLTask = NULL;
-   if(pFilpData==NULL)
-   {
-      return false;
-   }
-   pOpenTask = pFilpData->pOpenTask;
-   pReadTask = pFilpData->pReadTask;
-   pWriteTask = pFilpData->pWriteTask;
-   pIOCTLTask = pFilpData->pIOCTLTask;
-   if(signal_pending(current))
-   {
-      DBG( "signal_pending current\n");
-      return true;
-   }
-   if(signal_pending(pOpenTask))
-   {
-      DBG( "signal_pending pOpenTask\n");
-      return true;
-   }
-   if(signal_pending(pReadTask))
-   {
-      DBG( "signal_pending pReadTask\n");
-      return true;
-   }
-   if(signal_pending(pWriteTask))
-   {
-      DBG( "signal_pending pWriteTask\n");
-      return true;
-   }
-   if(signal_pending(pIOCTLTask))
-   {
-      DBG( "signal_pending pIOCTLTask\n");
-      return true;
-   }
-
-   return false;
-}
-
-/*===========================================================================
-ReleaseFilpClientID
-
-   ReleaseFilpClientID (Private Method)
-
-DESCRIPTION:
-   Release Flip ClientID.
-
-PARAMETERS:
-   pFilpData          [ I ] - pointer to sQMIFilpStorage.
-RETURN VALUE:
-   none
-===========================================================================*/
-void ReleaseFilpClientID(sQMIFilpStorage * pFilpData)
-{
-   if (pFilpData->mClientID !=  0xffff)
-   {
-      pFilpData->iSemID = __LINE__;
-      if ( (pFilpData->iReadSyncResult>=0) &&
-        (pFilpData->mpDev->mbUnload < eStatUnloading) &&
-        !IsDeviceDisconnect(pFilpData->mpDev))
-      {
-         ReleaseClientID( pFilpData->mpDev,
-                     pFilpData->mClientID);
-         pFilpData->iSemID = -__LINE__;
-         pFilpData->mClientID =  0xffff;
-         mb();
-      }
-   }
-}
-
-/*===========================================================================
-assign_filp_pointer_to_null
-
-   assign_filp_pointer_to_null (Private Method)
-
-DESCRIPTION:
-   Assign the file to NULL in every process.
-
-PARAMETERS:
-   filp          [ I ] - pointer to file.
-RETURN VALUE:
-   none
-===========================================================================*/
-void assign_filp_pointer_to_null(struct file *filp)
-{
-   struct task_struct *pEachTask;
-   struct fdtable * pFDT;
-   struct file * pFilp;
-   int count = 0;
-   struct inode *inode = NULL;
-   if(filp==NULL)
-      return;
-   inode = file_inode(filp);
-   rcu_read_lock();
-   for_each_process( pEachTask )
-   {
-      if (pEachTask == NULL || pEachTask->files == NULL)
-      {
-         // Some tasks may not have files (e.g. Xsession)
-         continue;
-      }
-      spin_lock( &pEachTask->files->file_lock);
-      pFDT = files_fdtable( pEachTask->files );
-      for (count = 0; count < pFDT->max_fds; count++)
-      {
-         pFilp = pFDT->fd[count];
-         #if (LINUX_VERSION_CODE >= KERNEL_VERSION( 3,19,0 ))
-         if (pFilp != NULL &&  pFilp->f_path.dentry != NULL)
-         #else
-         if (pFilp != NULL &&  pFilp->f_dentry != NULL)
-         #endif
-         {
-            #if (LINUX_VERSION_CODE >= KERNEL_VERSION( 3,19,0 ))
-            if (pFilp->f_path.dentry->d_inode == inode)
-            #else
-            if (pFilp->f_dentry->d_inode == inode)
-            #endif
-            {
-               // Close this file handle
-               rcu_assign_pointer( pFDT->fd[count], NULL );
-            }
-         }
-      }
-      spin_unlock( &pEachTask->files->file_lock);
-   }
-   rcu_read_unlock();
-   return ;
-}
-
-/*===========================================================================
-bIsQMIInterrupt
-
-   bIsQMIInterrupt (Private Method)
-
-DESCRIPTION:
-   Validate QMI interrupt URB.
-
-PARAMETERS:
-   pIntURB          [ I ] - pointer to URB.
-RETURN VALUE:
-   true - Is QMI Interrupt URB.
-   false - NOT QMI Interrupt URB.
-===========================================================================*/
-bool bIsQMIInterrupt(struct urb *pURB)
-{
-   const u8 QMIIntBytes[6]={0xA1,0x01,0x00,0x00,0x08,0x00};
-   if(!pURB)
-   {
-      return false;
-   }
-   if(pURB->actual_length < 6)
-   {
-      return false;
-   }
-   if(memcmp(QMIIntBytes,pURB->transfer_buffer,sizeof(QMIIntBytes))==0)
-   {
-      return true;
-   }
-   return false;
 }
 

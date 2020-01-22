@@ -86,9 +86,7 @@ USB/xhci: Enable remote wakeup for USB3 devices
 #include "Structs.h"
 #include "QMIDevice.h"
 #include "QMI.h"
-#ifdef TX_URB_MONITOR
 #include "gobi_usbnet.h"
-#endif
 #include <linux/etherdevice.h>
 #include <linux/ethtool.h>
 #include <linux/module.h>
@@ -98,10 +96,6 @@ USB/xhci: Enable remote wakeup for USB3 devices
 #include <linux/skbuff.h>
 #include <linux/netdevice.h>
 #include <net/xfrm.h>
-
-#ifdef CONFIG_ANDROID
-#include <linux/suspend.h>
-#endif
 
 #ifdef CONFIG_MEMCG
 //#define MEMCG_NOT_FIX
@@ -130,26 +124,20 @@ static inline __u8 ipv6_tclass2(const struct ipv6hdr *iph)
 #endif
 
 #define BIT_9X15    (31)
-
 //-----------------------------------------------------------------------------
-// Probe device one by one 
-// Must set to "1" for Android
-// Some slow system may wrongly probe int 8 as qcqmi1 and int 10 as qcqmi0
-// It cause data call start on wrong interface and device flag not correctly set by indication
-// DHCP client won't work in this case
+// Probe one device at the time when set to "1"
 //-----------------------------------------------------------------------------
 #ifdef CONFIG_ANDROID
-    #define _PROBE_LOCK_ 1
+#define _PROBE_LOCK_ 1
 #else
-    #define _PROBE_LOCK_ 0
+#define _PROBE_LOCK_ 1
 #endif
-
 //-----------------------------------------------------------------------------
 // Definitions
 //-----------------------------------------------------------------------------
 
 // Version Information
-#define DRIVER_VERSION "2018-06-15/SWI_2.49 Android"
+#define DRIVER_VERSION "2018-10-26/SWI_2.54"
 #define DRIVER_AUTHOR "Qualcomm Innovation Center"
 #define DRIVER_DESC "GobiNet"
 #define QOS_HDR_LEN (6)
@@ -161,16 +149,11 @@ static inline __u8 ipv6_tclass2(const struct ipv6hdr *iph)
 #define MAC48_MULTICAST_ID (0x33)
 #define GOBI_MAX_SINGLE_PACKET_SIZE 2048
 #define FIX_RX_BUFFER 1
-#define USB_CONF_ATTRIBUTE_REMOTE_WAKEUP_ENABLE 0x20
 
 // Debug flag
 int debug;
 int qos_debug;
 int iModuleExit=0;
-#ifdef CONFIG_ANDROID
-int wakelock_debug=0;
-#endif
-
 /*
  * enable/disable TE flow control
  */
@@ -178,8 +161,6 @@ int iTEEnable=-1;
 int iQMAPEnable=-1;
 int iMaxQMUXSupported=-1;
 int iIPAlias=1;
-//Fill zero to ethernet header source address.
-int iEthSrcMACNonZero=0;
 /*
  * Is RAW IP RAW
  */
@@ -239,9 +220,6 @@ int txQueueLength = 100;
 static struct class * gpClass;
 struct semaphore taskLoading;
 
-// To idenitify spin_is_locked is worked as expected.
-bool iIsSpinIsLockedSupported = true;
-
 /**************************************************/
 bool isModuleUnload(sGobiUSBNet *pDev);
 int FixEthFrame(struct usbnet *dev, struct sk_buff *skb, int isIpv4);
@@ -268,23 +246,6 @@ void gobi_netif_stop_queue(struct net_device *dev);
 void gobi_usbnet_stop(struct net_device *net);
 int gobi_rtnl_trylock(void);
 void stop_virtual_netdev(struct net_device *dev);
-int iIsRemoteWakeupSupport(struct usbnet * pDev);
-bool isSpinLockCheckSupport(void);
-
-
-#ifdef CONFIG_ANDROID
-int GobiNetResetResume( struct usb_interface * pIntf );
-void GobiNetReset(struct usb_interface * pIntf);
-static void gobi_work_handler(struct work_struct *w);
-DEFINE_MUTEX(pm_mutex);
-
-static void GobiNetDriverUnbind(
-   struct usbnet *         pDev,
-   struct usb_interface *  pIntf);
-static int GobiNetDriverBind(
-   struct usbnet *         pDev,
-   struct usb_interface *  pIntf );
-#endif
 
 int CreateQMAPRxBuffer(sGobiUSBNet *pGobiDev)
 {
@@ -397,11 +358,8 @@ int work_function(void *data)
    char szQMIBusName[64]={0};
    struct usb_device *dev = NULL;
    
+   #if _PROBE_LOCK_
    int i = 0;
-   if(!pGobiDev)
-   {
-      return -1;
-   }
    while(0!=down_trylock( &taskLoading ))
    {
      if((gobi_kthread_should_stop())||
@@ -438,11 +396,7 @@ int work_function(void *data)
       }
    }
    set_current_state(TASK_RUNNING);
-
-   if(!pGobiDev)
-   {
-      return -1;
-   }
+   #endif
    dev = interface_to_usbdev(pGobiDev->mUsb_Interface);
    snprintf(szQMIBusName,63,"qcqmi%d-%d-%s:%d.%d",   
       (int)pGobiDev->mQMIDev.qcqmi,   
@@ -505,13 +459,10 @@ int work_function(void *data)
          pGobiDev->task = NULL;
          pGobiDev->iTaskID = -1;
       }
-      #ifdef CONFIG_ANDROID
-      gobiUnLockSystemSleep(pGobiDev);
-      #endif
    }
-
+   #if _PROBE_LOCK_
    up(&taskLoading);
-
+   #endif
    if (status != 0)
    {
       // usbnet_disconnect() will call GobiNetDriverUnbind() which will call
@@ -576,9 +527,6 @@ void SetCurrentSuspendStat(sGobiUSBNet *pGobiDev,bool bSuspend)
    unsigned long flags = 0;
    spin_lock_irqsave(&pGobiDev->sSuspendLock,flags);
    pGobiDev->bSuspend = bSuspend;
-   #ifdef CONFIG_ANDROID
-   pGobiDev->iSuspendReadWrite = RESUME_TX_RX_DISABLE;
-   #endif
    spin_unlock_irqrestore(&pGobiDev->sSuspendLock,flags);
 }
 
@@ -618,49 +566,33 @@ int GobiNetSuspend(
 
    if (pDev == NULL || pDev->net == NULL)
    {
-      #ifdef CONFIG_ANDROID
-      printk(KERN_ERR"failed to get netdevice\n" );
-      #else
       DBG( "failed to get netdevice\n" );
-      #endif
       return -ENXIO;
    }
 
    pGobiDev = (sGobiUSBNet *)pDev->data[0];
    if (pGobiDev == NULL)
    {
-      #ifdef CONFIG_ANDROID
-      printk(KERN_ERR"failed to get QMIDevice\n" );
-      #else
       DBG( "failed to get QMIDevice\n" );
-      #endif
       return -ENXIO;
    }
-   #ifdef CONFIG_ANDROID
-   if(pGobiDev)
-   {
-      struct wakeup_source *ws = pGobiDev->ws;
-      PRINT_WS_LOCK(ws);
-      if(ws->active)
-      {
-         WLDEBUG("WakeLock is activated\n" );
-         return -EBUSY;
-      }
-   }
-   GobiSetDownReason( pGobiDev, DRIVER_SUSPENDED );  // disable interface asap
-   #endif
 
-   DBG( "ConfigPowerSaveSettings\n" );
-   if(ConfigPowerSaveSettings(pGobiDev,QMIWDS,QMI_WDS_GET_PKT_SRVC_STATUS_IND)<0)
-      printk(KERN_ERR"Config Power Save Setting error 1\n");
-   if(ConfigPowerSaveSettings(pGobiDev,QMINAS,QMI_NAS_SERVING_SYSTEM_IND)<0)
-      printk(KERN_ERR"Config Power Save Setting error 2\n");
-   if(ConfigPowerSaveSettings(pGobiDev,QMIWMS,QMI_WMS_EVENT_REPORT_IND)<0)
-      printk(KERN_ERR"Config Power Save Setting error 3\n");
-   if(ConfigPowerSaveSettings(pGobiDev,QMIVOICE,QMI_VOICE_ALL_CALL_STATUS_IND)<0)
-      printk(KERN_ERR"Config Power Save Setting error 4\n");
-   if(ConfigPowerSaveSettings(pGobiDev,QMIUIM,QMI_UIM_SIM_STATUS_CHANGED_IND)<0)
-      printk(KERN_ERR"Config Power Save Setting error 5\n");
+   #if (LINUX_VERSION_CODE < KERNEL_VERSION( 2,6,33 ))
+   if (pDev->udev->auto_pm == 0)
+   #else
+   if ((powerEvent.event & PM_EVENT_AUTO) == 0)
+   #endif
+   {
+      DBG( "ConfigPowerSaveSettings\n" );
+      if(ConfigPowerSaveSettings(pGobiDev,QMIWDS,QMI_WDS_GET_PKT_SRVC_STATUS_IND)<0)
+         printk(KERN_ERR"Config Power Save Setting error 1\n");
+      if(ConfigPowerSaveSettings(pGobiDev,QMINAS,QMI_NAS_SERVING_SYSTEM_IND)<0)
+         printk(KERN_ERR"Config Power Save Setting error 2\n");
+      if(ConfigPowerSaveSettings(pGobiDev,QMIWMS,QMI_WMS_EVENT_REPORT_IND)<0)
+         printk(KERN_ERR"Config Power Save Setting error 3\n");
+      if(ConfigPowerSaveSettings(pGobiDev,QMIVOICE,QMI_VOICE_ALL_CALL_STATUS_IND)<0)
+         printk(KERN_ERR"Config Power Save Setting error 4\n");
+   }
 
    if(SetPowerSaveMode(pGobiDev,1)<0)
    {
@@ -724,19 +656,16 @@ int GobiNetSuspend(
    }
    #endif
    //USB/xhci: Enable remote wakeup for USB3 devices
-   if(iIsRemoteWakeupSupport(pDev))
+   nRet = Gobi_usb_control_msg(pIntf,pDev->udev, usb_sndctrlpipe(pDev->udev, 0),
+                               USB_REQ_SET_FEATURE, USB_RECIP_DEVICE,
+                               USB_DEVICE_REMOTE_WAKEUP,
+                               0, //Don't care about which interface
+                               NULL,
+                               0,
+                               USB_CTRL_SET_TIMEOUT);
+   if (nRet != 0)
    {
-      nRet = Gobi_usb_control_msg(pIntf,pDev->udev, usb_sndctrlpipe(pDev->udev, 0),
-                                  USB_REQ_SET_FEATURE, USB_RECIP_DEVICE,
-                                  USB_DEVICE_REMOTE_WAKEUP,
-                                  0, //Don't care about which interface
-                                  NULL,
-                                  0,
-                                  USB_CTRL_SET_TIMEOUT);
-      if (nRet != 0)
-      {
-          DBG("[line:%d] send usb_control_msg failed!nRet = %d\n", __LINE__, nRet);
-      }
+       DBG("[line:%d] send usb_control_msg failed!nRet = %d\n", __LINE__, nRet);
    }
    // Run usbnet's suspend function so that the kernel spin lock counter keeps balance
    return usbnet_suspend( pIntf, powerEvent );
@@ -776,29 +705,17 @@ int GobiNetResume( struct usb_interface * pIntf )
 
    if (pDev == NULL || pDev->net == NULL)
    {
-      #ifdef CONFIG_ANDROID
-      printk(KERN_ERR"failed to get netdevice\n" );
-      #else
       DBG( "failed to get netdevice\n" );
-      #endif
       return -ENXIO;
    }
 
    pGobiDev = (sGobiUSBNet *)pDev->data[0];
    if (pGobiDev == NULL)
    {
-      #ifdef CONFIG_ANDROID
-      printk(KERN_ERR"failed to get QMIDevice\n" );
-      #else
       DBG( "failed to get QMIDevice\n" );
-      #endif
       return -ENXIO;
    }
 
-   #ifdef CONFIG_ANDROID
-   gobiLockSystemSleep(pGobiDev);
-   gobiUnLockSystemSleep(pGobiDev);
-   #endif
    oldPowerState = pIntf->dev.power.power_state.event;
    pIntf->dev.power.power_state.event = PM_EVENT_ON;
    DBG( "resuming from power mode 0x%04x\n", oldPowerState );
@@ -810,23 +727,13 @@ int GobiNetResume( struct usb_interface * pIntf )
       complete( &pGobiDev->mAutoPM.mThreadDoWork );
 #endif
 
-   #ifndef CONFIG_ANDROID
-   SendWakeupControlMsg(pIntf,oldPowerState);
-   #else
-   SendWakeupControlMsg(pIntf,oldPowerState);
-   GobiClearDownReason( pGobiDev, DRIVER_SUSPENDED );
-   SetCurrentSuspendStat(pGobiDev,0);
-   #endif
 
+   SendWakeupControlMsg(pIntf,oldPowerState);
    /* Run usbnet's resume function so that the kernel spin lock counter keeps balance */
    nRet = usbnet_resume( pIntf );
    if (nRet != 0)
    {
-      #ifdef CONFIG_ANDROID
-      printk(KERN_ERR"[line:%d] usbnet_resume failed!nRet = %d\n", __LINE__, nRet);
-      #else 
-      DBG("[line:%d] usbnet_resume failed!nRet = %d\n", __LINE__, nRet);
-      #endif
+       DBG("[line:%d] usbnet_resume failed!nRet = %d\n", __LINE__, nRet);
    }
    SetCurrentSuspendStat(pGobiDev,0);
    if(pGobiDev->mbUnload < eStatUnloading)
@@ -835,29 +742,13 @@ int GobiNetResume( struct usb_interface * pIntf )
 
       if(SetPowerSaveMode(pGobiDev,0)<0)
       {
-         printk(KERN_ERR" Resume Set Power Save Mode 0 error 1\n");
-         //Disable data traffic now
-         #ifdef CONFIG_ANDROID
-         SetCurrentSuspendStat(pGobiDev,1);
-         GobiClearDownReason( pGobiDev, DRIVER_SUSPENDED );
-         netif_carrier_off( pGobiDev->mpNetDev->net );
-         return nRet;
-         #endif
+         printk(KERN_ERR" Resume Set Power Save Mode error\n");
       }
       else
       {
-         #ifdef CONFIG_ANDROID
-         printk(KERN_INFO"Set Power Save Mode 0\n" );
-         #else
          DBG( "Set Power Save Mode 0\n" );
-         #endif
       }
    }
-   #ifdef CONFIG_ANDROID
-   // It doesn't matter if this is autoresume or system resume
-   SetTxRxStat(pGobiDev,RESUME_RX_OKAY);
-   SetTxRxStat(pGobiDev,RESUME_TX_OKAY);
-   #endif
    return nRet;
 }
 
@@ -884,11 +775,13 @@ void GobiNetReset(struct usb_interface * pIntf)
 
 int GobiNetResetResume( struct usb_interface * pIntf )
 {
-   printk(KERN_INFO"reset resume suspend\n");
+   DBG("reset resume suspend\n");
    if(pIntf->cur_altsetting->desc.bInterfaceNumber ==8)
    {
-      printk(KERN_INFO"Reset Device\n");
-      usb_queue_reset_device(pIntf);
+      struct usb_device *udev;
+      printk("Reset Device\n");
+      udev = interface_to_usbdev(pIntf);
+      usb_reset_device(udev);
    }
    return 0;
 }
@@ -901,15 +794,6 @@ void UsbAutopmGetInterface(struct usb_interface * intf)
    gobi_usb_autopm_get_interface_async(intf);
    #else
    gobi_usb_autopm_get_interface_no_resume(intf); 
-   #endif
-}
-
-void UsbAutopmPutInterface(struct usb_interface * intf)
-{
-   #if (LINUX_VERSION_CODE < KERNEL_VERSION( 3,0,0 ))
-   gobi_usb_autopm_put_interface_async(intf);
-   #else
-   gobi_usb_autopm_put_interface_no_resume(intf); 
    #endif
 }
 
@@ -1067,12 +951,6 @@ static int GobiNetDriverBind(
         pIn->desc.bEndpointAddress,
         pOut->desc.bEndpointAddress );
 
-   usb_reset_endpoint(pDev->udev,pIn->desc.bEndpointAddress);
-   usb_reset_endpoint(pDev->udev,pOut->desc.bEndpointAddress);
-
-   usb_clear_halt(pDev->udev, pDev->in);
-   usb_clear_halt(pDev->udev, pDev->out);
-
    // In later versions of the kernel, usbnet helps with this
 #if (LINUX_VERSION_CODE <= KERNEL_VERSION( 2,6,23 ))
    pIntf->dev.platform_data = (void *)pDev;
@@ -1083,9 +961,6 @@ static int GobiNetDriverBind(
        pDev->net->dev_addr[0] |= 0x02;   /* set local assignment bit */
        pDev->net->dev_addr[0] &= 0xbf;   /* clear "IP" bit */
    }
-
-   /* change MAC addr to include, ifacenum, and to be unique */
-   pDev->net->dev_addr[ETH_ALEN-1] = pIntf->cur_altsetting->desc.bInterfaceNumber;
 
    return 0;
 }
@@ -1113,9 +988,6 @@ static void GobiNetDriverUnbind(
    {
        return ;
    }
-   #ifdef CONFIG_ANDROID
-   printk(KERN_INFO"GobiNet unbind \n");
-   #endif
    // Should already be down, but just in case...
    gobi_netif_stop_queue(pDev->net);
    netif_carrier_off( pDev->net );
@@ -1136,28 +1008,7 @@ static void GobiNetDriverUnbind(
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION( 2,6,19 ))
    pIntf->needs_remote_wakeup = 0;
 #endif
-   #ifdef CONFIG_ANDROID
-   if(pGobiDev)
-   {
-      struct wakeup_source *ws = pGobiDev->ws;
-      if(ws)
-      {
-         PRINT_WS_LOCK(ws);
-         WLDEBUG("__pm_relax\n");
-         gobiPmRelax(pGobiDev);
-         PRINT_WS_LOCK(ws);
-         printk(KERN_ERR "wakeup_source_unregister\n");
-         wakeup_source_unregister(ws);
-         printk(KERN_ERR "device_wakeup_disable\n");
-         device_wakeup_disable(&pIntf->dev);
-         #if (LINUX_VERSION_CODE >= KERNEL_VERSION( 3,11,0 ) )
-         #ifdef CONFIG_PM
-         pm_print_active_wakeup_sources();
-         #endif
-         #endif
-      }
-   }
-   #endif
+
    kfree( pGobiDev );
    pGobiDev = NULL;
 }
@@ -1191,27 +1042,12 @@ struct sk_buff *GobiNetDriverTxFixup(
       return NULL;
    }
    #ifdef CONFIG_PM
-   #ifndef CONFIG_ANDROID   //only require for auto suspend
    if(bIsSuspend(pGobiDev))
    {
       DBG("Suspended\n");
       UsbAutopmGetInterface( pGobiDev->mpIntf );
-      UsbAutopmPutInterface( pGobiDev->mpIntf );
+      gobi_usb_autopm_put_interface( pGobiDev->mpIntf );
    }
-   #else
-
-   if(bIsSuspend(pGobiDev))
-   {
-      gobi_usb_autopm_get_interface_async( pGobiDev->mpIntf );
-      gobi_usb_autopm_put_interface_async( pGobiDev->mpIntf );
-   }
-   if(0==GetTxRxStat(pGobiDev,RESUME_TX_OKAY))
-   {
-      DBG("Suspended Tx Drop\n");
-      return NULL;
-   }
-   
-   #endif
    #else
    DBG( "\n" );
    #endif
@@ -1488,7 +1324,7 @@ static int GobiNetDriverRxFixup(
    /* This check is no longer done by usbnet after 3.13*/ 
    if (pSKB->len < pDev->net->hard_header_len)
    {
-      printk(KERN_INFO "Packet Dropped \n" );
+      printk( "Packet Dropped \n" );
       return 0;
    }
    pGobiDev = (sGobiUSBNet *)pDev->data[0];
@@ -1502,7 +1338,7 @@ static int GobiNetDriverRxFixup(
    {
       DBG("Suspended\n");
       UsbAutopmGetInterface( pGobiDev->mpIntf );
-      UsbAutopmPutInterface( pGobiDev->mpIntf );
+      gobi_usb_autopm_put_interface( pGobiDev->mpIntf );
     }
     #endif
    if(pGobiDev->iQMUXEnable!=0)
@@ -1561,7 +1397,7 @@ static int GobiNetDriverRxFixup(
          {
             memcpy(pGobiDev->pLastSKB->data+offset,pSKB->data, pSKB->len);
             pGobiDev->pLastSKB->len = pGobiDev->pLastSKB->len + pSKB->len;
-            NETDBG("\nAppend length:%d/Last SKB Len:%d/Rx SKB Len%d\n",length,pGobiDev->pLastSKB->len,pSKB->len);
+            NETDBG("\nAppend length:%d/Last SKB Len:%d/Rx SKB Len%d\n",length,skb->len,pSKB->len);
             //NetHex (skb->data, skb->len);
             pGobiDev->iPacketInComplete = 1;
             pGobiDev->pLastSKB->dev = pDev->net;
@@ -1977,11 +1813,7 @@ int GobiUSBNetStartXmit(
    sURBList * pURBListEntry, ** ppURBListEnd;
    void * pURBData;
    struct usbnet * pDev = NULL;
-   #if (LINUX_VERSION_CODE >= KERNEL_VERSION( 4,20,0 ))
-   const struct driver_info *info;
-   #else
    struct driver_info *info;
-   #endif
 
    DBG( "\n" );
    if(pNet==NULL)
@@ -2376,17 +2208,7 @@ void ResetEthHeader(struct usbnet *dev, struct sk_buff *skb, int isIpv4, int isQ
      }
      else
      {
-        if(iEthSrcMACNonZero==0)
-        {
-           memset(eth_hdr(skb)->h_source, 0, ETH_ALEN);
-        }
-        else
-        {
-           //To workaround packet drop in bridge mode.
-           const unsigned char MacOctetXor = 0xC3;
-           memcpy(eth_hdr(skb)->h_source, dev->net->dev_addr, ETH_ALEN);
-           eth_hdr(skb)->h_source[ETH_ALEN - 1] ^= MacOctetXor;
-        }
+        memset(eth_hdr(skb)->h_source, 0, ETH_ALEN);
         memcpy(eth_hdr(skb)->h_dest, dev->net->dev_addr, ETH_ALEN);
      }
      ip_type = isIpv4 == 1 ? ETH_P_IP : ETH_P_IPV6;
@@ -2492,28 +2314,12 @@ static int GobiNetDriverLteRxFixup(struct usbnet *dev, struct sk_buff *skb)
       return 0;
    }
    #ifdef CONFIG_PM
-   #ifndef CONFIG_ANDROID   //only require for auto suspend
    if(bIsSuspend(pGobiDev))
    {
       DBG("Suspended\n");
       UsbAutopmGetInterface( pGobiDev->mpIntf );
-      UsbAutopmPutInterface( pGobiDev->mpIntf );
+      gobi_usb_autopm_put_interface( pGobiDev->mpIntf );
    }
-   #else
-
-   //auto suspend wakeup
-   if(bIsSuspend(pGobiDev)  &&
-      (GetTxRxStat(pGobiDev,RESUME_RX_OKAY)==0))
-   {
-      gobi_usb_autopm_get_interface_async( pGobiDev->mpIntf );
-      gobi_usb_autopm_put_interface_async( pGobiDev->mpIntf );
-   }
-   if(GetTxRxStat(pGobiDev,RESUME_RX_OKAY)==0)
-   {
-      DBG("Suspended Rx Drop\n");
-      return 0;
-   }
-   #endif
    #endif
    if(pGobiDev->iQMUXEnable!=0)
    {
@@ -2533,7 +2339,7 @@ static int GobiNetDriverLteRxFixup(struct usbnet *dev, struct sk_buff *skb)
    }
    if (skb->len < dev->net->hard_header_len)
    {
-      printk(KERN_INFO "Packet Dropped \n" );
+      printk( "Packet Dropped \n" );
       return 0;
    }
    DBG( "From Modem: ");
@@ -2604,15 +2410,7 @@ fix_dest:
 /*=========================================================================*/
 static const struct driver_info GobiNetInfo_qmi = {
    .description   = "QmiNet Ethernet Device",
-#ifdef CONFIG_ANDROID
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION( 2,6,39 ))
-    .flags         = FLAG_WWAN,
-#else
-    .flags         = FLAG_ETHER,
-#endif
-#else
    .flags         = FLAG_ETHER,
-#endif
    .bind          = GobiNetDriverBind,
    .unbind        = GobiNetDriverUnbind,
 //FIXME refactor below fixup handling at cases below
@@ -2629,15 +2427,7 @@ static const struct driver_info GobiNetInfo_qmi = {
 
 static const struct driver_info GobiNetInfo_gobi = {
    .description   = "GobiNet Ethernet Device",
-#ifdef CONFIG_ANDROID
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION( 2,6,39 ))
-    .flags         = FLAG_WWAN,
-#else
-    .flags         = FLAG_ETHER,
-#endif
-#else
    .flags         = FLAG_ETHER,
-#endif
    .bind          = GobiNetDriverBind,
    .unbind        = GobiNetDriverUnbind,
    .rx_fixup      = GobiNetDriverLteRxFixup,
@@ -2652,15 +2442,7 @@ static const struct driver_info GobiNetInfo_gobi = {
 
 static const struct driver_info GobiNetInfo_9x15 = {
    .description   = "GobiNet Ethernet Device",
-#ifdef CONFIG_ANDROID
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION( 2,6,39 ))
-    .flags         = FLAG_WWAN,
-#else
-    .flags         = FLAG_ETHER,
-#endif
-#else
    .flags         = FLAG_ETHER,
-#endif
    .bind          = GobiNetDriverBind,
    .unbind        = GobiNetDriverUnbind,
    .rx_fixup      = GobiNetDriverLteRxFixup,
@@ -2699,6 +2481,7 @@ static const struct usb_device_id GobiVIDPIDTable [] =
    {QMI_G3K_DEVICE(0x1199, 0x9013)},
    {QMI_G3K_DEVICE(0x1199, 0x9015)},
    {QMI_G3K_DEVICE(0x1199, 0x9019)},
+   {QMI_G3K_DEVICE(0x03f0, 0x371d)},
    // 9x15
    {QMI_9X15_DEVICE(0x1199, 0x9071)}, /* consider 9x30 and 9x50 same as 9x15 at the moment, change it later if needed */
    {QMI_9X15_DEVICE(0x1199, 0x68C0)},
@@ -2723,7 +2506,9 @@ static const struct usb_device_id GobiVIDPIDTable [] =
    
    //AR758x
    {QMI_9X15_DEVICE(0x1199, 0x9102)},
-
+   
+   //AR758x
+   {QMI_9X15_DEVICE(0x1199, 0x9110)},
    //Terminating entry
    { }
 };
@@ -2755,23 +2540,23 @@ void PrintCurrentUSBSpeed(struct usbnet * pDev)
    switch(pDev->udev->speed)
     {
         case USB_SPEED_LOW:
-            printk(KERN_INFO"USB Speed : USB 1.0 SPEED LOW\n");
+            printk("USB Speed : USB 1.0 SPEED LOW\n");
             break;
         case USB_SPEED_FULL:
-            printk(KERN_INFO"USB Speed : USB 1.0 SPEED FULL\n");
+            printk("USB Speed : USB 1.0 SPEED FULL\n");
             break;
         case USB_SPEED_HIGH:
-            printk(KERN_INFO"USB Speed : USB 2.0\n");
+            printk("USB Speed : USB 2.0\n");
             break;
         case USB_SPEED_WIRELESS:
-            printk(KERN_INFO"USB Speed : USB 2.5\n");
+            printk("USB Speed : USB 2.5\n");
             break;
         case USB_SPEED_SUPER:
-            printk(KERN_INFO"USB Speed : USB 3.0\n");
+            printk("USB Speed : USB 3.0\n");
             break;
         case USB_SPEED_UNKNOWN:
         default:
-            printk(KERN_INFO"USB Speed : USB SPEED UNKNOWN\n");
+            printk("USB Speed : USB SPEED UNKNOWN\n");
             break;
     }
 }
@@ -2843,7 +2628,6 @@ int GobiUSBNetProbe(
    sGobiUSBNet * pGobiDev;
    struct ethhdr *eth;
    int iNumberOfMUXIDSupported=0;
-   int i = 0;
 
 #if 0
    /* There exists a race condition in the firmware that sometimes results
@@ -2950,12 +2734,6 @@ int GobiUSBNetProbe(
    pDev->data[0] = (unsigned long)pGobiDev;
    pGobiDev->iUSBState = USB_STATE_ATTACHED;
    pGobiDev->mpNetDev = pDev;
-   pGobiDev->iIsUSBReset = false;
-   atomic_set(&pGobiDev->aClientMemIsLock,CLIENT_MEMORY_UNLOCK);
-   for(i=0;i<MAX_MUX_NUMBER_SUPPORTED;i++)
-   {
-      pGobiDev->QMUXWDSCientID[i] = (u16)-1;
-   }
 
    // Clearing endpoint halt is a magic handshake that brings 
    // the device out of low power (airplane) mode
@@ -3030,6 +2808,9 @@ int GobiUSBNetProbe(
 
    pGobiDev->mpIntf = pIntf;
    memset( &(pGobiDev->mMEID), '0', MAX_DEVICE_MEID_SIZE );
+
+   /* change MAC addr to include, ifacenum, and to be unique */
+   pGobiDev->mpNetDev->net->dev_addr[ETH_ALEN-1] = ifacenum;
 
    DBG( "Mac Address:\n" );
    PrintHex( &pGobiDev->mpNetDev->net->dev_addr[0], 6 );
@@ -3139,7 +2920,6 @@ int GobiUSBNetProbe(
    pGobiDev->mIs9x15= is9x15;
    pGobiDev->mUsb_Interface = pIntf;
    pGobiDev->iTaskID = 0;
-   pGobiDev->mQMIDev.qcqmi = get_qcqmi_from_table();
    if(pGobiDev->iTaskID>=0)
    {      
       GobiInitWorkQueue(pGobiDev);
@@ -3160,25 +2940,7 @@ int GobiUSBNetProbe(
    {
       DBG(KERN_INFO"GobiNet Thread : Error\n");
    }
-   #ifdef CONFIG_ANDROID
-   if (pGobiDev)
-   {
-      struct wakeup_source *ws = NULL;
-      char szWakeSourceName[MAX_WS_NAME_SIZE]={0};
-      pGobiDev->mpIntf = pIntf;
-      memset(&szWakeSourceName,0,sizeof(szWakeSourceName));
-      GenerateProcessName("Gobi",szWakeSourceName,sizeof(szWakeSourceName),pGobiDev);
-      WLDEBUG("device_wakeup_enable\n");
-      device_wakeup_enable(&pIntf->dev);
-      WLDEBUG("wakeup_source_register\n");
-      ws = wakeup_source_register(szWakeSourceName);
-      if (!ws)
-         return -ENOMEM;
-      rcu_assign_pointer(pGobiDev->ws, ws);
-      PRINT_WS_LOCK(ws);      
-      gobiStayAwake(pGobiDev);
-   }
-   #endif
+
    PrintCurrentUSBSpeed(pDev);
    // Success
    return 0;
@@ -3260,38 +3022,11 @@ bool isModuleUnload(sGobiUSBNet *    pDev)
    } 
    return false;
 }
-
-/*===========================================================================
-METHOD:
-   isSpinLockCheckSupport (Private Method)
-
-DESCRIPTION:
-   Check whether spin_is_locked is wokring.
-
-RETURN VALUE:
-   bool - true for supported
-          false for NOT supported
-===========================================================================*/
-bool isSpinLockCheckSupport(void)
-{
-   spinlock_t lLock;
-   bool bRet = false;
-   spin_lock_init(&lLock);
-   spin_lock_irq(&lLock);
-   if(spin_is_locked(&lLock)==1)
-   {
-      bRet = true;
-   }
-   spin_unlock_irq(&lLock);
-   return bRet;
-}
-
 static int __init GobiUSBNetModInit( void )
 {
    int i;
    int j;
    iModuleExit = 0;
-   iIsSpinIsLockedSupported = isSpinLockCheckSupport();
    gpClass = class_create( THIS_MODULE, "GobiQMI" );
    if (IS_ERR( gpClass ) == true)
    {
@@ -3315,14 +3050,10 @@ static int __init GobiUSBNetModInit( void )
          memset(&GobiPrivateWorkQueues[i][j],0,sizeof(sGobiPrivateWorkQueues));
       }
    }
-
+   #if _PROBE_LOCK_
    sema_init( &taskLoading, SEMI_INIT_DEFAULT_VALUE );
    up(&taskLoading);
-
-   if(iIsSpinIsLockedSupported==false)
-   {
-      DBG("spin_is_locked is not supported\n");
-   }
+   #endif
    return usb_register( &GobiNet );
 }
 module_init( GobiUSBNetModInit );
@@ -3385,14 +3116,14 @@ void SendWakeupControlMsg(
 
    if (pDev == NULL || pDev->net == NULL)
    {
-      printk(KERN_ERR "failed to get netdevice\n" );
+      DBG( "failed to get netdevice\n" );
       return ;
    }
 
    pGobiDev = (sGobiUSBNet *)pDev->data[0];
    if (pGobiDev == NULL)
    {
-      printk(KERN_ERR "failed to get QMIDevice\n" );
+      DBG( "failed to get QMIDevice\n" );
       return ;
    }
    #if defined(USB_INTRF_FUNC_SUSPEND) && defined(USB_INTRF_FUNC_SUSPEND_RW)
@@ -3405,25 +3136,22 @@ void SendWakeupControlMsg(
                                NULL, 0, USB_CTRL_SET_TIMEOUT);
       if (nRet != 0)
       {
-         printk(KERN_ERR"[line:%d] send usb_control_msg failed!nRet = %d\n", __LINE__, nRet);
+         DBG("[line:%d] send usb_control_msg failed!nRet = %d\n", __LINE__, nRet);
       }
    }
 #endif
-   if( iIsRemoteWakeupSupport(pDev) )
+   //USB/xhci: Enable remote wakeup for USB3 devices
+   nRet = Gobi_usb_control_msg(pIntf,pDev->udev, usb_sndctrlpipe(pDev->udev, 0),
+                                         USB_REQ_CLEAR_FEATURE,
+                                                 USB_RECIP_DEVICE,
+                                         USB_DEVICE_REMOTE_WAKEUP, 
+                                         0,//Don't care about which interface
+                                         NULL, 
+                                         0,
+                                         USB_CTRL_SET_TIMEOUT);
+   if (nRet != 0)
    {
-      //USB/xhci: Enable remote wakeup for USB3 devices
-      nRet = Gobi_usb_control_msg(pIntf,pDev->udev, usb_sndctrlpipe(pDev->udev, 0),
-                                            USB_REQ_CLEAR_FEATURE,
-                                                    USB_RECIP_DEVICE,
-                                            USB_DEVICE_REMOTE_WAKEUP, 
-                                            0,//Don't care about which interface
-                                            NULL, 
-                                            0,
-                                            USB_CTRL_SET_TIMEOUT);
-      if (nRet != 0)
-      {
-          DBG("[line:%d] send usb_control_msg failed!nRet = %d\n", __LINE__, nRet);
-      }
+       DBG("[line:%d] send usb_control_msg failed!nRet = %d\n", __LINE__, nRet);
    }
    // 9x30(EM74xx) needs this when resume
    nRet = Gobi_usb_control_msg(pIntf, pDev->udev,
@@ -3435,7 +3163,7 @@ void SendWakeupControlMsg(
            NULL, 0, USB_CTRL_SET_TIMEOUT);
    if (nRet != 0)
    {
-       printk(KERN_ERR "fail at sending DTR during resume %d\n", nRet );
+       DBG( "fail at sending DTR during resume %d\n", nRet );
    }
 
    
@@ -3513,6 +3241,8 @@ int gobi_dev_forward_skb(struct net_device *dev, struct sk_buff *skb)
    }
    else
    {
+      dev->stats.rx_packets++;
+      dev->stats.rx_bytes+= skb->len;
       DBG( "NET_RX_SUCCESS\n" );
       dev->stats.rx_packets++;
       dev->stats.rx_bytes+= skb->len;
@@ -3566,32 +3296,7 @@ RETURN VALUE:
 int GobiUSBLockReset( struct usb_interface * pIntf )
 {
    int ret =-1;
-   sGobiUSBNet * pGobiDev;
-   struct usbnet * pDev;
    struct usb_device *udev;
-   DBG("");
-#if (LINUX_VERSION_CODE > KERNEL_VERSION( 2,6,23 ))
-   pDev = usb_get_intfdata( pIntf );
-#else
-   pDev = (struct usbnet *)pIntf->dev.platform_data;
-#endif
-   if(pDev)
-   {
-      pGobiDev = (sGobiUSBNet *)pDev->data[0];
-      if (pGobiDev != NULL)
-      {
-          pGobiDev->iIsUSBReset = true;
-      }
-      else
-      {
-         printk(KERN_ERR "%sNULL sGobiUSBNet\n",__FUNCTION__);
-      }
-   }
-   else
-   {
-      printk(KERN_ERR "%sNULL intf data\n",__FUNCTION__);
-   }
-   
    if(!pIntf)
    {
       printk(KERN_ERR "NULL Intf\n");
@@ -3611,7 +3316,7 @@ int GobiUSBLockReset( struct usb_interface * pIntf )
    }
    printk(KERN_INFO "Reset Device\n");
    udev = interface_to_usbdev(pIntf);
-   usb_queue_reset_device(pIntf);
+   usb_reset_device(udev);
    usb_unlock_device(udev);
    return 0;
 }
@@ -3765,37 +3470,6 @@ void stop_virtual_netdev(struct net_device *dev)
    rtnl_unlock();
 }
 
-/*===========================================================================
-METHOD:
-   iIsRemoteWakeupSupport (Private Method)
-
-DESCRIPTION:
-   Check device remote wakeup is supported.
-
-PARAMETERS
-   pDev          [ I ] - net device pointer
-
-RETURN VALUE:
-   int - 0 not supported.
-       - 1 supported.
-===========================================================================*/
-int iIsRemoteWakeupSupport(struct usbnet *pDev)
-{
-   if( (pDev) &&
-       (pDev->udev) && 
-       (pDev->udev->config))
-   {
-      if(USB_CONF_ATTRIBUTE_REMOTE_WAKEUP_ENABLE & 
-         pDev->udev->config->desc.bmAttributes)
-      {
-         DBG("Remote WakeUp Enable\n");
-         return 1;
-      }
-      
-   }
-   return 0;
-}
-
 module_exit( GobiUSBNetModExit );
 
 MODULE_VERSION( DRIVER_VERSION );
@@ -3830,12 +3504,4 @@ MODULE_PARM_DESC( iMaxQMUXSupported, "-1: Auto, Max QMUX instance support" );
 
 module_param( iIPAlias, int, S_IRUGO | S_IWUSR );
 MODULE_PARM_DESC( iIPAlias, "0 = virtual adapter , 1 (default) = IP alias" );
-
-module_param( iEthSrcMACNonZero, int, S_IRUGO | S_IWUSR );
-MODULE_PARM_DESC( iEthSrcMACNonZero, "0(default) = Ethernet Header Source Address : Zeros , 1  = Ethernet Header Source Address: Non-zero" );
-
-#ifdef CONFIG_ANDROID
-module_param( wakelock_debug, int, S_IRUGO | S_IWUSR );
-MODULE_PARM_DESC( wakelock_debug, "Wake lock debug enabled or not" );
-#endif
 

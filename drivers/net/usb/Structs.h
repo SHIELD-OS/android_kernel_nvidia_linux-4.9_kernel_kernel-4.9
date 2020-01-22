@@ -83,9 +83,6 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <linux/timer.h>
 #include <linux/proc_fs.h>
 #include <linux/workqueue.h>
-#ifdef CONFIG_PM
-#include <linux/pm_runtime.h>
-#endif
 
 #if (LINUX_VERSION_CODE <= KERNEL_VERSION( 2,6,24 ))
    #include "usbnet.h"
@@ -125,11 +122,6 @@ POSSIBILITY OF SUCH DAMAGE.
 struct sGobiUSBNet;
 
 #define MAX_WQ_PROC_NAME_SIZE 512
-
-#ifdef CONFIG_ANDROID 
-#define MAX_WS_NAME_SIZE 64
-#endif
-
 /*=========================================================================*/
 // Struct sGobiPrivateWorkQueues
 //
@@ -452,11 +444,6 @@ enum{
    eNetDeviceLink_Connected,
 };
 
-#ifdef CONFIG_ANDROID
-#define RESUME_TX_RX_DISABLE 0x00
-#define RESUME_RX_OKAY 0x01
-#define RESUME_TX_OKAY 0x02
-#endif
 /*=========================================================================*/
 // Struct sGobiUSBNet
 //
@@ -503,11 +490,7 @@ typedef struct sGobiUSBNet
    u8  eth_hdr_tmpl_ipv4[ETH_HLEN];
    /* IPv6 */
    u8  eth_hdr_tmpl_ipv6[ETH_HLEN];
-   #ifdef CONFIG_ANDROID
-   /* for backup USB auto suspend delay */
-   ssize_t                autosuspend_delay;
-   bool                   autosuspend_overrided;
-   #endif
+
    u32 tx_qlen;
 
    sMappingTable maps;
@@ -532,9 +515,6 @@ typedef struct sGobiUSBNet
    #ifdef CONFIG_PM
    bool bSuspend;
    spinlock_t sSuspendLock;
-   #ifdef CONFIG_ANDROID
-   int iSuspendReadWrite;
-   #endif
    #endif
    bool mIs9x15;
    struct usb_interface *mUsb_Interface;
@@ -550,7 +530,6 @@ typedef struct sGobiUSBNet
    struct device *qcqmidev;
    struct device *dev;
    u16 WDSClientID;
-   u16 QMUXWDSCientID[MAX_MUX_NUMBER_SUPPORTED];
    int iNetLinkStatus;
    int iDataMode;
    spinlock_t urb_lock;
@@ -578,30 +557,7 @@ typedef struct sGobiUSBNet
     */
    struct workqueue_struct *wqProcessReadCallback;
    struct delayed_work dwProcessReadCallback;
-   #ifdef CONFIG_ANDROID
-   /*
-    * Workqueue and Delaywork to Process Lock System Sleep.
-    */
-   struct workqueue_struct *wqLockSystemSleep;
-   struct delayed_work dwLockSystemSleep;
-
-   /*
-    * Workqueue and Delaywork to Process UnLock System Sleep.
-    */
-   struct workqueue_struct *wqUnLockSystemSleep;
-   struct delayed_work dwUnLockSystemSleep;
-   #endif
    struct urb *pReadURB;
-   #ifdef CONFIG_ANDROID
-   struct wakeup_source __rcu *ws;
-   #endif
-   int iIsUSBReset;
-   /**
-    * Workaround spin_is_locked not function as expected.
-    **/
-#define CLIENT_MEMORY_LOCK 1
-#define CLIENT_MEMORY_UNLOCK 0
-   atomic_t aClientMemIsLock;
 } sGobiUSBNet;
 
 /*=========================================================================*/
