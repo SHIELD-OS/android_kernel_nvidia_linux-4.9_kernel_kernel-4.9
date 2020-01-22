@@ -86,7 +86,9 @@ USB/xhci: Enable remote wakeup for USB3 devices
 #include "Structs.h"
 #include "QMIDevice.h"
 #include "QMI.h"
+#ifdef TX_URB_MONITOR
 #include "gobi_usbnet.h"
+#endif
 #include <linux/etherdevice.h>
 #include <linux/ethtool.h>
 #include <linux/module.h>
@@ -130,11 +132,24 @@ static inline __u8 ipv6_tclass2(const struct ipv6hdr *iph)
 #define BIT_9X15    (31)
 
 //-----------------------------------------------------------------------------
+// Probe device one by one 
+// Must set to "1" for Android
+// Some slow system may wrongly probe int 8 as qcqmi1 and int 10 as qcqmi0
+// It cause data call start on wrong interface and device flag not correctly set by indication
+// DHCP client won't work in this case
+//-----------------------------------------------------------------------------
+#ifdef CONFIG_ANDROID
+    #define _PROBE_LOCK_ 1
+#else
+    #define _PROBE_LOCK_ 0
+#endif
+
+//-----------------------------------------------------------------------------
 // Definitions
 //-----------------------------------------------------------------------------
 
 // Version Information
-#define DRIVER_VERSION "2019-11-22/SWI_2.60"
+#define DRIVER_VERSION "2018-06-15/SWI_2.49 Android"
 #define DRIVER_AUTHOR "Qualcomm Innovation Center"
 #define DRIVER_DESC "GobiNet"
 #define QOS_HDR_LEN (6)
