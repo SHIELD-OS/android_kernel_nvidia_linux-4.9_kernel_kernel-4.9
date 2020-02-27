@@ -127,15 +127,51 @@ POSSIBILITY OF SUCH DAMAGE.
 //---------------------------------------------------------------------------
 #include "Structs.h"
 #include "QMI.h"
+#ifdef CONFIG_ANDROID
+#include <linux/suspend.h>
+#endif
 
 #define MAX_QCQMI 255
 #define MAX_QCQMI_PER_INTF 2
 #define SEMI_INIT_DEFAULT_VALUE 0
 #define QMI_CONTROL_MSG_DELAY_MS 100
 #define QMI_CONTROL_MAX_MSG_DELAY_MS QMI_CONTROL_MSG_DELAY_MS * 5
+// QMI CTL
+#define QMI_CTL_IND 0x02
+#define QMI_CTL_SYNC_IND 0x0027
 
 extern int qcqmi_table[MAX_QCQMI];
 extern int qmux_table[MAX_QCQMI];
+
+#define get_qcqmi_from_table() ({\
+   int ret = 0;\
+   for(ret=0;ret<MAX_QCQMI;ret++)\
+   {\
+       if (qcqmi_table[ret] == 0)\
+           break;\
+   }\
+   if (ret == MAX_QCQMI)\
+   {\
+       printk(KERN_ERR "no free entry available at qcqmi_table rray\n");\
+       ret=-ENOMEM;\
+   }else{\
+      DBG("get qcqmi_table:%d\n",ret);\
+      qcqmi_table[ret] = 1;\
+   }\
+   ret;\
+})
+
+#define release_qcqmi_from_table(i) ({\
+   if( (i<MAX_QCQMI) && \
+       (qcqmi_table[i] == 1) )\
+   {\
+      qcqmi_table[i] = 0;\
+      DBG("rel qcqmi_table:%d\n",i);\
+   }else{\
+      printk(KERN_ERR "Invalid entry:(%d) at qcqmi_table\n",i);\
+   }\
+})
+
 extern sGobiPrivateWorkQueues GobiPrivateWorkQueues[MAX_QCQMI][MAX_QCQMI_PER_INTF];
 //Register State
 enum {
@@ -163,6 +199,7 @@ bool bIsSuspend(sGobiUSBNet *pGobiDev);
 #endif
 
 void UsbAutopmGetInterface(struct usb_interface * intf);
+void UsbAutopmPutInterface(struct usb_interface * intf);
 
 // Print Hex data, for debug purposes
 void PrintHex(
@@ -417,7 +454,7 @@ void QMIWDSCallback(
    void *             pData );
 
 // Fire off reqests and start async read for QMI WDS callback
-int SetupQMIWDSCallback( sGobiUSBNet * pDev );
+int SetupQMIWDSCallback( sGobiUSBNet * pDev,u8 QMUXID);
 
 int SetupQMIQOSCallback( sGobiUSBNet * pDev );
 
@@ -503,6 +540,7 @@ static inline int gobi_usb_autopm_get_interface(struct usb_interface *intf)
 }
 void gobi_usb_autopm_put_interface(struct usb_interface *intf);
 void gobi_usb_autopm_get_interface_no_resume(struct usb_interface *intf);
+void gobi_usb_autopm_put_interface_no_resume(struct usb_interface *intf);
 int gobi_usb_autopm_get_interface_async(struct usb_interface *intf);
 void gobi_usb_autopm_put_interface_async(struct usb_interface *intf);
 #if (LINUX_VERSION_CODE < KERNEL_VERSION( 2,6,33 ))
@@ -543,3 +581,20 @@ void GobiDestoryWorkQueue(sGobiUSBNet *pGobiDev);
 // Clean up work queues in sGobiPrivateWorkQueues
 int iClearWorkQueuesByTableIndex(int index);
 
+#ifdef CONFIG_ANDROID
+#define  DELAY_MS_DEFAULT  round_jiffies_relative(30*HZ)
+//
+void SetTxRxStat(sGobiUSBNet *pGobiDev,int state);
+//
+int GetTxRxStat(sGobiUSBNet *pGobiDev,int Channel);
+//
+void gobiLockSystemSleep(sGobiUSBNet *pGobiDev);
+//
+void gobiUnLockSystemSleep(sGobiUSBNet *pGobiDev);
+//
+void gobiStayAwake(sGobiUSBNet *pGobiDev);
+//
+void gobiPmRelax(sGobiUSBNet *pGobiDev);
+//
+int GenerateProcessName(const char *pPrefix,char *szProcessName,unsigned sizeofName,sGobiUSBNet *pGobiDev );
+#endif

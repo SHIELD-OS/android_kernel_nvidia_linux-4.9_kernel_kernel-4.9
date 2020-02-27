@@ -133,6 +133,36 @@ if(qos_debug == 1)\
    printk( KERN_INFO "GobiNet[QoS]::%s " format, __FUNCTION__, ## arg );\
 }
 
+#ifdef CONFIG_ANDROID
+#include <linux/module.h>
+#include <linux/kernel.h>
+#include <linux/version.h>
+
+extern int wakelock_debug;
+#define WLDEBUG(format, arg...)\
+if(wakelock_debug == 1)\
+{\
+   printk( KERN_INFO "GobiNet[WL]::%s " format, __FUNCTION__, ## arg );\
+}
+
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION( 3,11,0 ) )
+#ifdef CONFIG_PM
+#define PRINT_WS_LOCK(x) \
+   if(wakelock_debug == 1)\
+   {\
+      pm_print_active_wakeup_sources(); \
+      printk(KERN_ERR "%s:%d wakeup_count:%lu\n",__FUNCTION__,__LINE__,x->wakeup_count); \
+      printk(KERN_ERR "%s:%d active_count:%lu\n",__FUNCTION__,__LINE__,x->active_count); \
+      printk(KERN_ERR "%s:%d expire_count:%lu\n",__FUNCTION__,__LINE__,x->expire_count); \
+      printk(KERN_ERR "%s:%d active:%d\n",__FUNCTION__,__LINE__,x->active); \
+      printk(KERN_ERR "%s:%d relax_count:%lu\n",__FUNCTION__,__LINE__,x->relax_count); \
+   }
+#endif
+#else //else CONFIG_PM
+#define PRINT_WS_LOCK(x) 
+#endif //end CONFIG_PM
+#endif// end if (LINUX_VERSION_CODE >= KERNEL_VERSION( 3,11,0 ) )
+
 /* The following definition is disabled (commented out) by default.
  * When uncommented it enables raw IP data format mode of operation */
 /*#define DATA_MODE_RP*/
@@ -152,11 +182,13 @@ if(qos_debug == 1)\
 #define QMINAS   3
 #define QMIWMS   5
 #define QMIVOICE 9
+#define QMIUIM   0x0B
 
 #define QMI_WMS_EVENT_REPORT_IND        0x01
 #define QMI_NAS_SERVING_SYSTEM_IND      0x24
 #define QMI_VOICE_ALL_CALL_STATUS_IND   0x2E
 #define QMI_WDS_GET_PKT_SRVC_STATUS_IND 0x22
+#define QMI_UIM_SIM_STATUS_CHANGED_IND  0x32
 
 #define u8        unsigned char
 #define u16       unsigned short
@@ -516,3 +548,10 @@ enum{
 
 void PrintIPV6Addr(ipv6_addr * addr);
 int iIsZeroIPv6Addr(ipv6_addr *pAddr);
+u16 QMIWDSSetQMuxIDReqSize( void );
+int QMIWDSSetQMuxIDReq(
+   void *   pBuffer,
+   u16      buffSize,
+   u16      transactionID,
+   u8       MuxID);
+
